@@ -1,0 +1,29 @@
+# DFT Configuration
+dft:
+  functional: B3LYP
+  basis: def2-SVP
+  verbose: 3
+  max_memory: 8000  # MB
+  scf_conv_tol: 1e-9
+
+# Queue Configuration
+queue:
+  backend: mp  # mp or redis
+  redis_host: localhost
+  redis_port: 6379
+  redis_db: 0
+  redis_password: null
+
+# Feature Extraction
+features:
+  output_format: json  # json or hdf5
+  use_multiwfn: false
+  multiwfn_path: Multiwfn
+
+# Pipeline Settings
+pipeline:
+  n_consumers: 4
+  temp_dir: temp/
+  output_dir: output/
+  log_dir: logs/
+  cleanup_temp: true

@@ -1,0 +1,1 @@
+# Consumer module for CPU feature extraction
