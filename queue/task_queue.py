@@ -7,7 +7,7 @@ import json
 import pickle
 import time
 from typing import Any, Dict, Optional, Union
-from multiprocessing import Queue as MPQueue
+from multiprocessing import Queue as MPQueue, Manager
 from contextlib import contextmanager
 
 from loguru import logger
@@ -22,12 +22,23 @@ except ImportError:
     logger.warning("Redis not available, only multiprocessing backend supported")
 
 
+# 全局 Manager 实例（用于共享队列）
+_manager = None
+
+def get_manager():
+    """获取全局 Manager 实例"""
+    global _manager
+    if _manager is None:
+        _manager = Manager()
+    return _manager
+
+
 class TaskQueue:
     """
     异步任务队列
     
     支持两种后端：
-    - multiprocessing: 单机多核，适合单机部署
+    - multiprocessing: 单机多核，适合单机部署（使用 Manager().Queue() 实现共享）
     - redis: 分布式，适合多机集群
     """
     
@@ -41,6 +52,7 @@ class TaskQueue:
         queue_name: str = "qcgem_tasks",
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        mp_queue: Optional[MPQueue] = None,  # 允许传入共享队列
     ):
         """
         初始化任务队列
@@ -65,7 +77,7 @@ class TaskQueue:
                 raise ImportError("Redis backend requires 'redis' package")
             self._init_redis(redis_host, redis_port, redis_db, redis_password)
         elif self.backend == "mp":
-            self._init_mp()
+            self._init_mp(mp_queue)  # 传入共享队列
         else:
             raise ValueError(f"Unknown backend: {backend}")
         
@@ -98,10 +110,19 @@ class TaskQueue:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
     
-    def _init_mp(self):
-        """初始化 multiprocessing 队列"""
-        self.mp_queue = MPQueue()
-        logger.info("Initialized multiprocessing queue")
+    def _init_mp(self, mp_queue: Optional[MPQueue] = None):
+        """初始化 multiprocessing 队列（使用 Manager 实现共享）"""
+        if mp_queue is not None:
+            # 使用传入的共享队列
+            self.mp_queue = mp_queue
+            self._owns_queue = False
+            logger.info("Using shared multiprocessing queue")
+        else:
+            # 创建新的共享队列
+            manager = get_manager()
+            self.mp_queue = manager.Queue()
+            self._owns_queue = True
+            logger.info("Created shared multiprocessing queue via Manager")
     
     def put(self, task: Dict[str, Any], block: bool = True, timeout: Optional[float] = None) -> bool:
         """

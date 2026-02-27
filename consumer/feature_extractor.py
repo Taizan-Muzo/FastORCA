@@ -146,7 +146,7 @@ class FeatureExtractor:
         """
         计算 Hirshfeld 电荷
         
-        使用简化的 Hirshfeld 布居分析方法
+        使用 PySCF 内置的 Hirshfeld 布居分析
         
         Args:
             mol: PySCF Mole 对象
@@ -156,51 +156,17 @@ class FeatureExtractor:
             原子电荷数组 (natm,)
         """
         try:
-            # 获取电子密度
-            dm = mf.make_rdm1()
+            # 使用 PySCF 的 Hirshfeld 模块
+            from pyscf.prop import hirshfeld
             
-            # 计算电子密度格点
-            from pyscf.dft import numint
+            # 创建 Hirshfeld 分析对象
+            hd = hirshfeld.Hirshfeld(mol, mf)
             
-            # 使用 Becke 格点
-            grids = dft.gen_grid.Grids(mol)
-            grids.level = 3
-            grids.build()
+            # 计算电荷
+            charges = hd.get_charges()
             
-            # 计算密度
-            rho = numint.get_rho(mol, dm, grids)
-            
-            # 简化的 Hirshfeld 分析（使用原子球近似）
-            # 注意：完整的 Hirshfeld 需要自由原子密度
-            # 这里使用简化的基于距离的权重
-            
-            coords = grids.coords
-            weights = grids.weights
-            
-            # 原子位置
-            atom_coords = mol.atom_coords()
-            
-            # 计算每个格点到各原子的距离
-            hirshfeld_weights = np.zeros((mol.natm, len(coords)))
-            for i in range(mol.natm):
-                dist = np.linalg.norm(coords - atom_coords[i], axis=1)
-                # 使用高斯权重
-                hirshfeld_weights[i] = np.exp(-dist**2 / 0.5**2)
-            
-            # 归一化权重
-            hirshfeld_weights /= hirshfeld_weights.sum(axis=0) + 1e-10
-            
-            # 计算原子布居
-            atomic_pop = np.zeros(mol.natm)
-            for i in range(mol.natm):
-                atomic_pop[i] = np.sum(rho * hirshfeld_weights[i] * weights)
-            
-            # Hirshfeld 电荷
-            charges = np.array([mol.atom_charge(i) for i in range(mol.natm)])
-            hirshfeld_charges = charges - atomic_pop
-            
-            logger.debug(f"Hirshfeld charges calculated: {hirshfeld_charges}")
-            return hirshfeld_charges
+            logger.debug(f"Hirshfeld charges calculated: {charges}")
+            return charges
             
         except Exception as e:
             logger.error(f"Failed to calculate Hirshfeld charges: {e}")

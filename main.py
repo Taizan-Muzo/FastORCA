@@ -8,7 +8,7 @@ import sys
 import time
 import signal
 from pathlib import Path
-from multiprocessing import Process, Event
+from multiprocessing import Process, Event, Manager
 from typing import List
 
 from loguru import logger
@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from producer.dft_calculator import DFTCalculator
 from consumer.feature_extractor import FeatureExtractor
 from queue.task_queue import TaskQueue
+
+# Poison pill 标记（表示生产者已完成）
+POISON_PILL = {"__poison_pill__": True}
 
 
 def setup_logging(log_dir: str = "logs"):
@@ -51,6 +54,7 @@ def producer_worker(
     queue_config: dict,
     dft_config: dict,
     stop_event: Event,
+    shared_queue=None,  # 传入共享队列
 ):
     """
     GPU 生产者工作进程
@@ -60,12 +64,16 @@ def producer_worker(
         queue_config: 队列配置
         dft_config: DFT 计算配置
         stop_event: 停止事件
+        shared_queue: 共享队列实例
     """
     logger.info("Producer worker started")
     
-    # 初始化组件
+    # 初始化组件（使用共享队列）
     calculator = DFTCalculator(**dft_config)
-    queue = TaskQueue(**queue_config)
+    if shared_queue is not None:
+        queue = TaskQueue(mp_queue=shared_queue)
+    else:
+        queue = TaskQueue(**queue_config)
     
     success_count = 0
     failed_count = 0
@@ -111,6 +119,20 @@ def producer_worker(
             except Exception as e:
                 failed_count += 1
                 logger.error(f"[{molecule_id}] Processing failed: {e}")
+        
+        # 发送 poison pill 通知消费者结束
+        logger.info("Producer finished, sending poison pills to consumers...")
+        n_consumers = queue_config.get('n_consumers', 1)
+        for _ in range(n_consumers):
+            queue.put(POISON_PILL)
+            
+    finally:
+        queue.close()
+        logger.info(f"Producer finished: {success_count} succeeded, {failed_count} failed")
+                
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"[{molecule_id}] Processing failed: {e}")
     
     finally:
         queue.close()
@@ -122,6 +144,7 @@ def consumer_worker(
     extractor_config: dict,
     output_dir: str,
     stop_event: Event,
+    shared_queue=None,  # 传入共享队列
 ):
     """
     CPU 消费者工作进程
@@ -131,23 +154,35 @@ def consumer_worker(
         extractor_config: 特征提取配置
         output_dir: 输出目录
         stop_event: 停止事件
+        shared_queue: 共享队列实例
     """
     logger.info("Consumer worker started")
     
-    # 初始化组件
+    # 初始化组件（使用共享队列）
     extractor = FeatureExtractor(**extractor_config)
-    queue = TaskQueue(**queue_config)
+    if shared_queue is not None:
+        queue = TaskQueue(mp_queue=shared_queue)
+    else:
+        queue = TaskQueue(**queue_config)
     
     success_count = 0
     failed_count = 0
+    poison_pill_received = False
     
     try:
-        while not stop_event.is_set():
-            # 获取任务（非阻塞，定期检查停止事件）
+        while not stop_event.is_set() and not poison_pill_received:
+            # 获取任务（阻塞，但会检查 poison pill）
             task = queue.get(block=True, timeout=1.0)
             
             if task is None:
                 continue
+            
+            # 检查 poison pill
+            if task.get("__poison_pill__"):
+                logger.info("Consumer received poison pill, exiting...")
+                poison_pill_received = True
+                queue.task_done()
+                break
             
             molecule_id = task["molecule_id"]
             fchk_path = task["fchk_path"]
@@ -257,6 +292,7 @@ def main():
     
     queue_config = {
         "backend": args.queue_backend,
+        "n_consumers": args.n_consumers,  # 用于 poison pill 数量
     }
     
     extractor_config = {
@@ -273,22 +309,27 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
+    # 创建共享队列（关键修复）
+    manager = Manager()
+    shared_queue = manager.Queue()
+    logger.info("Created shared queue via Manager")
+    
     # 启动进程
     processes = []
     
-    # 生产者进程
+    # 生产者进程（传入共享队列）
     producer = Process(
         target=producer_worker,
-        args=(smiles_list, queue_config, dft_config, stop_event),
+        args=(smiles_list, queue_config, dft_config, stop_event, shared_queue),
     )
     producer.start()
     processes.append(producer)
     
-    # 消费者进程
+    # 消费者进程（传入共享队列）
     for i in range(args.n_consumers):
         consumer = Process(
             target=consumer_worker,
-            args=(queue_config, extractor_config, args.output, stop_event),
+            args=(queue_config, extractor_config, args.output, stop_event, shared_queue),
         )
         consumer.start()
         processes.append(consumer)
