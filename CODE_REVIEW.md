@@ -5,6 +5,30 @@
 **项目名称**: FastORCA (原 qcgem_gpu_pipeline)
 **目标**: 基于 PySCF-GPU 的高通量量子化学特征异步提取流水线
 **架构**: 生产者-消费者模式（GPU DFT + CPU 特征提取）
+**GitHub**: https://github.com/Taizan-Muzo/FastORCA
+
+---
+
+## 开发历史记录
+
+### 2025-02-27 重大 Bug 修复
+
+**修复内容**:
+1. ✅ **队列共享问题** (P0)
+   - 添加全局 `Manager()` 创建共享队列
+   - `TaskQueue` 支持传入 `mp_queue` 参数
+   - 生产者和消费者使用同一队列实例
+
+2. ✅ **Poison Pill 机制** (P0)
+   - 定义 `POISON_PILL = {"__poison_pill__": True}`
+   - 生产者结束后发送 poison pill 通知消费者
+   - 消费者识别后优雅退出
+
+3. ✅ **Hirshfeld 实现修复** (P1)
+   - 从简化版改为使用 `pyscf.prop.hirshfeld`
+   - 正确的 Hirshfeld 人口分析方法
+
+**提交记录**: `680b443` - Fix: All critical bugs from code review
 
 ---
 
@@ -187,6 +211,31 @@ FastORCA/
 5. 添加单元测试
 6. 实现 NBO 分析
 7. 批处理优化
+
+---
+
+## 待解决问题清单
+
+### 🔴 阻塞性问题（已修复）
+- [x] 队列不共享 - 使用 Manager().Queue() 修复
+- [x] 无 poison pill - 已添加机制
+- [x] Hirshfeld 近似 - 使用 pyscf.prop.hirshfeld 修复
+
+### 🟡 高优先级
+- [ ] 任务超时机制 - 防止卡住无法恢复
+- [ ] 临时目录清理 - 除 fchk 外还需清理日志等
+- [ ] 多构象支持 - from_smiles 中 n_conformers 未使用
+
+### 🟢 中优先级
+- [ ] NBO 分析实现 - 需要 Multiwfn
+- [ ] 密度矩阵缓存 - 避免重复计算
+- [ ] 内存单位文档化 - 明确使用 GB
+
+### 🔵 低优先级
+- [ ] 单元测试 - 当前无测试覆盖
+- [ ] 批处理 DFT - 当前逐个计算
+- [ ] 异步 IO - 使用 aiofiles
+- [ ] 进度监控 - 添加 tqdm
 
 ---
 
