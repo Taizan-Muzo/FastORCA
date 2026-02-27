@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import time
 
 import numpy as np
+import scipy
 from loguru import logger
 
 # PySCF imports for wavefunction analysis
@@ -343,6 +344,7 @@ class FeatureExtractor:
             
             # 2. 键级
             features["mayer_bond_orders"] = self.extract_mayer_bond_orders(mol, mf).tolist()
+            features["wiberg_bond_orders"] = self.extract_wiberg_bond_orders(mol, mf).tolist()
             
             # 3. 分子信息
             features["natm"] = mol.natm
