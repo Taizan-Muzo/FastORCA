@@ -1,4 +1,4 @@
-# qcgem_gpu_pipeline
+# FastORCA
 
 基于 PySCF-GPU 的高通量量子化学特征异步提取流水线
 
@@ -48,7 +48,7 @@ python test_pipeline.py
 ## 目录结构
 
 ```
-qcgem_gpu_pipeline/
+FastORCA/
 ├── producer/          # GPU DFT 计算模块
 ├── consumer/          # CPU 特征提取模块
 ├── queue/             # 异步队列模块
