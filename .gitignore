@@ -1,0 +1,10 @@
+__pycache__/
+consumer/__pycache__/
+logs/
+output/
+output*/
+producer/__pycache__/
+test_output/
+utils/__pycache__/
+AGENTS.md
+test_molecules.smi

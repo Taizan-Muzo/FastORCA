@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from producer.dft_calculator import DFTCalculator
 from consumer.feature_extractor import FeatureExtractor
-from queue.task_queue import TaskQueue
+from taskqueue.task_queue import TaskQueue
 
 # Poison pill 标记（表示生产者已完成）
 POISON_PILL = {"__poison_pill__": True}
@@ -55,6 +55,7 @@ def producer_worker(
     dft_config: dict,
     stop_event: Event,
     shared_queue=None,  # 传入共享队列
+    start_idx: int = 0,  # 全局起始索引，用于生成唯一分子ID
 ):
     """
     GPU 生产者工作进程
@@ -65,8 +66,17 @@ def producer_worker(
         dft_config: DFT 计算配置
         stop_event: 停止事件
         shared_queue: 共享队列实例
+        start_idx: 全局起始索引，确保分子ID唯一
     """
-    logger.info("Producer worker started")
+    logger.info(f"Producer worker started (start_idx: {start_idx})")
+    
+    # 在子进程中初始化 CUDA（必须在导入 gpu4pyscf 之前）
+    try:
+        import cupy
+        cupy.cuda.Device(0).use()
+        logger.info("CUDA initialized in producer process")
+    except Exception as e:
+        logger.warning(f"CUDA initialization failed: {e}")
     
     # 初始化组件（使用共享队列）
     calculator = DFTCalculator(**dft_config)
@@ -84,7 +94,7 @@ def producer_worker(
                 logger.info("Producer received stop signal")
                 break
             
-            molecule_id = f"mol_{i:06d}"
+            molecule_id = f"mol_{(start_idx + i):06d}"
             
             try:
                 logger.info(f"[{molecule_id}] Processing: {smiles[:50]}...")
@@ -103,7 +113,7 @@ def producer_worker(
                     # 将任务放入队列
                     task = {
                         "molecule_id": molecule_id,
-                        "fchk_path": result["fchk_path"],
+                        "pkl_path": result["pkl_file"],
                         "metadata": {
                             "smiles": smiles,
                             "energy": result["energy"],
@@ -120,23 +130,12 @@ def producer_worker(
                 failed_count += 1
                 logger.error(f"[{molecule_id}] Processing failed: {e}")
         
-        # 发送 poison pill 通知消费者结束
-        logger.info("Producer finished, sending poison pills to consumers...")
-        n_consumers = queue_config.get('n_consumers', 1)
-        for _ in range(n_consumers):
-            queue.put(POISON_PILL)
-            
-    finally:
-        queue.close()
+        # 注意：poison pill 由主进程统一发送，避免多生产者重复发送
         logger.info(f"Producer finished: {success_count} succeeded, {failed_count} failed")
-                
-            except Exception as e:
-                failed_count += 1
-                logger.error(f"[{molecule_id}] Processing failed: {e}")
-    
-    finally:
-        queue.close()
-        logger.info(f"Producer finished: {success_count} succeeded, {failed_count} failed")
+        
+    except Exception as e:
+        logger.error(f"Producer error: {e}")
+        raise
 
 
 def consumer_worker(
@@ -185,23 +184,23 @@ def consumer_worker(
                 break
             
             molecule_id = task["molecule_id"]
-            fchk_path = task["fchk_path"]
+            pkl_path = task["pkl_path"]
             
             try:
                 logger.info(f"[{molecule_id}] Extracting features...")
                 
                 # 提取特征
-                features = extractor.extract_all_features(fchk_path, molecule_id)
+                features = extractor.extract_all_features(pkl_path, molecule_id)
                 
                 if features["success"]:
                     # 保存特征
                     output_path = Path(output_dir) / molecule_id
                     extractor.save_features(features, str(output_path))
                     
-                    # 删除临时 fchk 文件
+                    # 删除临时 pickle 文件
                     try:
-                        Path(fchk_path).unlink()
-                        logger.debug(f"[{molecule_id}] Removed temp file: {fchk_path}")
+                        Path(pkl_path).unlink()
+                        logger.debug(f"[{molecule_id}] Removed temp file: {pkl_path}")
                     except Exception as e:
                         logger.warning(f"[{molecule_id}] Failed to remove temp file: {e}")
                     
@@ -261,6 +260,12 @@ def main():
         help="消费者进程数",
     )
     parser.add_argument(
+        "--n-producers",
+        type=int,
+        default=1,
+        help="生产者进程数（GPU计算并行度），建议 5-20 以充分利用 A800 显存",
+    )
+    parser.add_argument(
         "--feature-format",
         default="json",
         choices=["json", "hdf5"],
@@ -317,29 +322,60 @@ def main():
     # 启动进程
     processes = []
     
-    # 生产者进程（传入共享队列）
-    producer = Process(
-        target=producer_worker,
-        args=(smiles_list, queue_config, dft_config, stop_event, shared_queue),
-    )
-    producer.start()
-    processes.append(producer)
+    # 将 SMILES 列表分片给多个生产者
+    n_producers = args.n_producers
+    chunk_size = (len(smiles_list) + n_producers - 1) // n_producers  # 向上取整
+    
+    logger.info(f"Distributing {len(smiles_list)} molecules to {n_producers} producers (chunk size: ~{chunk_size})")
+    
+    for i in range(n_producers):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, len(smiles_list))
+        chunk = smiles_list[start_idx:end_idx]
+        
+        if len(chunk) == 0:
+            continue
+        
+        # 生产者进程（传入分片的分子列表和全局起始索引）
+        producer = Process(
+            target=producer_worker,
+            args=(chunk, queue_config, dft_config, stop_event, shared_queue, start_idx),
+            name=f"Producer-{i}"
+        )
+        producer.start()
+        processes.append(producer)
+        logger.info(f"Started Producer-{i} with {len(chunk)} molecules [{start_idx}:{end_idx}]")
     
     # 消费者进程（传入共享队列）
     for i in range(args.n_consumers):
         consumer = Process(
             target=consumer_worker,
             args=(queue_config, extractor_config, args.output, stop_event, shared_queue),
+            name=f"Consumer-{i}"
         )
         consumer.start()
         processes.append(consumer)
     
-    logger.info(f"Pipeline started with 1 producer and {args.n_consumers} consumers")
+    logger.info(f"Pipeline started with {len([p for p in processes if p.name and 'Producer' in p.name])} producers and {args.n_consumers} consumers")
     
     # 等待完成
     try:
-        for p in processes:
+        # 先等待所有生产者完成
+        producers = [p for p in processes if p.name and 'Producer' in p.name]
+        consumers = [p for p in processes if p.name and 'Consumer' in p.name]
+        
+        for p in producers:
             p.join()
+        
+        # 所有生产者完成后，发送 poison pill 通知消费者退出
+        logger.info("All producers finished, sending poison pills to consumers...")
+        for _ in range(args.n_consumers):
+            shared_queue.put(POISON_PILL)
+        
+        # 等待所有消费者完成
+        for p in consumers:
+            p.join()
+            
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
         stop_event.set()
@@ -352,4 +388,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # 设置多进程启动方式为 spawn（CUDA 要求）
+    import multiprocessing
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        pass  # 已经设置过了
     main()

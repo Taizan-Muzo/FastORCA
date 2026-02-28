@@ -17,7 +17,7 @@ from loguru import logger
 
 from producer.dft_calculator import DFTCalculator
 from consumer.feature_extractor import FeatureExtractor
-from queue.task_queue import TaskQueue
+from taskqueue.task_queue import TaskQueue
 
 
 # 测试分子（100 个简单的有机分子）

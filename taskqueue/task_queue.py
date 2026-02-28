@@ -136,10 +136,10 @@ class TaskQueue:
         Returns:
             是否成功放入队列
         """
-        # 验证任务格式
+        # 验证任务格式（允许 poison pill）
         if not isinstance(task, dict):
             raise ValueError("Task must be a dictionary")
-        if "molecule_id" not in task:
+        if "molecule_id" not in task and "__poison_pill__" not in task:
             raise ValueError("Task must contain 'molecule_id'")
         
         for attempt in range(self.max_retries):
@@ -151,7 +151,7 @@ class TaskQueue:
                 else:
                     self.mp_queue.put(task, block=block, timeout=timeout)
                 
-                logger.debug(f"Task {task['molecule_id']} queued")
+                logger.debug(f"Task {task.get('molecule_id', 'poison_pill')} queued")
                 return True
                 
             except Exception as e:
@@ -191,7 +191,7 @@ class TaskQueue:
                     except:
                         return None
                 
-                logger.debug(f"Got task {task['molecule_id']}")
+                logger.debug(f"Got task {task.get('molecule_id', 'poison_pill')}")
                 return task
                 
             except Exception as e:
@@ -251,8 +251,7 @@ class TaskQueue:
         try:
             if self.backend == "redis":
                 self.redis_client.close()
-            else:
-                self.mp_queue.close()
+            # Note: Manager().Queue() doesn't have close() method
             logger.info("Queue closed")
         except Exception as e:
             logger.error(f"Error closing queue: {e}")
