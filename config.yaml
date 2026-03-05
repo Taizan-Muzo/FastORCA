@@ -5,6 +5,11 @@ dft:
   verbose: 3
   max_memory: 8000  # MB
   scf_conv_tol: 1e-9
+  
+  # 几何优化配置 (qcGEM 关键：需要最稳定构型)
+  geometry_optimization: true
+  geo_opt_method: xtb  # "xtb" (推荐，快100倍), "pyscf" (备用), "none" (禁用)
+  geo_opt_maxsteps: 100
 
 # Queue Configuration
 queue:
@@ -19,10 +24,15 @@ features:
   output_format: json  # json or hdf5
   use_multiwfn: false
   multiwfn_path: Multiwfn
+  
+  # 高级特征配置
+  save_fock_matrix: false  # 是否保存 IAO Fock 矩阵（数据量大，谨慎开启）
+  elf_grid_level: 2  # ELF 计算网格密度 (0-3)
 
 # Pipeline Settings
 pipeline:
   n_consumers: 4
+  n_producers: 1  # GPU 生产者数量，建议 5-20 充分利用 A800
   temp_dir: temp/
   output_dir: output/
   log_dir: logs/

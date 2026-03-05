@@ -157,6 +157,9 @@ def consumer_worker(
     """
     logger.info("Consumer worker started")
     
+    # 从配置中提取 save_fock_matrix 参数
+    save_fock_matrix = extractor_config.pop("save_fock_matrix", False)
+    
     # 初始化组件（使用共享队列）
     extractor = FeatureExtractor(**extractor_config)
     if shared_queue is not None:
@@ -190,7 +193,7 @@ def consumer_worker(
                 logger.info(f"[{molecule_id}] Extracting features...")
                 
                 # 提取特征
-                features = extractor.extract_all_features(pkl_path, molecule_id)
+                features = extractor.extract_all_features(pkl_path, molecule_id, save_fock_matrix=save_fock_matrix)
                 
                 if features["success"]:
                     # 保存特征
@@ -271,6 +274,24 @@ def main():
         choices=["json", "hdf5"],
         help="特征输出格式",
     )
+    parser.add_argument(
+        "--geometry-optimization",
+        action="store_true",
+        default=True,
+        help="启用几何优化（qcGEM 必需，提供最稳定构型）",
+    )
+    parser.add_argument(
+        "--geo-opt-method",
+        default="xtb",
+        choices=["xtb", "pyscf", "none"],
+        help="几何优化方法：xtb(快100倍，推荐), pyscf(备用), none(禁用)",
+    )
+    parser.add_argument(
+        "--save-fock-matrix",
+        action="store_true",
+        default=False,
+        help="保存 IAO Fock 矩阵（数据量大，用于研究轨道相互作用）",
+    )
     
     args = parser.parse_args()
     
@@ -293,6 +314,8 @@ def main():
         "functional": args.functional,
         "basis": args.basis,
         "verbose": 3,
+        "geometry_optimization": args.geometry_optimization,
+        "geo_opt_method": args.geo_opt_method,
     }
     
     queue_config = {
@@ -302,6 +325,7 @@ def main():
     
     extractor_config = {
         "output_format": args.feature_format,
+        "save_fock_matrix": args.save_fock_matrix,
     }
     
     # 停止事件

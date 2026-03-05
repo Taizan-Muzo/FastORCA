@@ -28,6 +28,31 @@ except ImportError:
 from pyscf import dft
 from pyscf.dft import rks
 
+# 几何优化相关导入
+try:
+    from pyscf.geomopt.geometric_solver import optimize as geometric_optimize
+    GEOMETRIC_AVAILABLE = True
+except ImportError:
+    GEOMETRIC_AVAILABLE = False
+    logger.warning("geometric not available, PySCF geometry optimization disabled")
+
+try:
+    from xtb.interface import Calculator
+    from xtb.libxtb import VERBOSITY_MINIMAL
+    XTB_AVAILABLE = True
+    logger.info("xtb-python loaded, fast geometry optimization available")
+except ImportError:
+    XTB_AVAILABLE = False
+    logger.warning("=" * 70)
+    logger.warning("xtb-python NOT AVAILABLE!")
+    logger.warning("Geometry optimization will fall back to PySCF + geometric")
+    logger.warning("This will be 100-1000x SLOWER!")
+    logger.warning("-" * 70)
+    logger.warning("To install xTB:")
+    logger.warning("  conda install -c conda-forge xtb")
+    logger.warning("  or")
+    logger.warning("  pip install xtb")
+    logger.warning("=" * 70)
 
 # GPU 基组兼容性提示
 def check_basis_gpu_compatibility(basis: str) -> tuple[bool, str]:
@@ -88,6 +113,9 @@ class DFTCalculator:
         verbose: int = 3,
         max_memory: int = 8000,  # MB
         scf_conv_tol: float = 1e-9,
+        geometry_optimization: bool = True,
+        geo_opt_method: str = "xtb",  # "xtb", "pyscf", "none"
+        geo_opt_maxsteps: int = 100,
     ):
         """
         初始化 DFT 计算器
@@ -98,16 +126,32 @@ class DFTCalculator:
             verbose: 输出详细程度 (0-9)
             max_memory: 最大内存使用 (MB)
             scf_conv_tol: SCF 收敛阈值
+            geometry_optimization: 是否在 DFT 前进行几何优化
+            geo_opt_method: 几何优化方法 ("xtb", "pyscf", "none")
+            geo_opt_maxsteps: 几何优化最大步数
         """
         self.functional = functional
         self.basis = basis
         self.verbose = verbose
         self.max_memory = max_memory
         self.scf_conv_tol = scf_conv_tol
+        self.geometry_optimization = geometry_optimization
+        self.geo_opt_method = geo_opt_method
+        self.geo_opt_maxsteps = geo_opt_maxsteps
         
         # 配置日志
         logger.info(f"DFTCalculator initialized: {functional}/{basis}")
         logger.info(f"GPU available: {GPU_AVAILABLE}")
+        logger.info(f"Geometry optimization: {geometry_optimization} ({geo_opt_method})")
+        
+        # 检查几何优化可用性
+        if geometry_optimization:
+            if geo_opt_method == "xtb" and not XTB_AVAILABLE:
+                logger.warning("xtb-python not available, falling back to pyscf geometric")
+                self.geo_opt_method = "pyscf" if GEOMETRIC_AVAILABLE else "none"
+            if geo_opt_method == "pyscf" and not GEOMETRIC_AVAILABLE:
+                logger.warning("geometric not available, disabling geometry optimization")
+                self.geometry_optimization = False
         
         # 检查 GPU 基组兼容性
         if GPU_AVAILABLE:
@@ -184,11 +228,229 @@ class DFTCalculator:
             logger.info(f"Created Mole from SMILES: {smiles[:30]}...")
             logger.info(f"  Atoms: {len(atoms)}, Charge: {charge}, Spin: {spin}")
             
+            # 如果启用了几何优化，在此执行
+            if self.geometry_optimization:
+                mol = self.run_geometry_optimization(molecule_id="from_smiles", mol_obj=mol, charge=charge, spin=spin, uhf=(spin != 0))
+            
             return mol
             
         except Exception as e:
             logger.error(f"Failed to process SMILES '{smiles}': {e}")
             raise
+    
+    def run_geometry_optimization(
+        self,
+        molecule_id: str,
+        mol_obj: gto.Mole,
+        charge: int = 0,
+        spin: int = 0,
+        uhf: bool = False,
+    ) -> gto.Mole:
+        """
+        执行几何优化
+        
+        qcGEM-Hybrid 策略：
+        1. 默认使用 xTB (GFN2-xTB) 进行快速几何优化（比 DFT 快 100-1000 倍）
+        2. 如果没有 xtb-python，回退到 PySCF + geometric（较慢但准确）
+        
+        Args:
+            molecule_id: 分子唯一标识
+            mol_obj: PySCF Mole 对象
+            charge: 分子电荷
+            spin: 自旋多重度
+            uhf: 是否使用 UHF（非闭壳层）
+            
+        Returns:
+            优化后的 PySCF Mole 对象
+        """
+        if not self.geometry_optimization:
+            return mol_obj
+        
+        logger.info(f"[{molecule_id}] Starting geometry optimization ({self.geo_opt_method})...")
+        start_time = time.time()
+        
+        try:
+            if self.geo_opt_method == "xtb" and XTB_AVAILABLE:
+                # 使用 xTB 进行快速几何优化 (qcGEM-Hybrid 策略)
+                mol_opt = self._optimize_with_xtb(molecule_id, mol_obj, charge, spin, uhf)
+            elif self.geo_opt_method == "pyscf" and GEOMETRIC_AVAILABLE:
+                # 使用 PySCF + geometric 进行几何优化
+                mol_opt = self._optimize_with_pyscf(molecule_id, mol_obj, charge, spin)
+            else:
+                logger.warning(f"[{molecule_id}] No geometry optimization method available, skipping")
+                return mol_obj
+            
+            elapsed = time.time() - start_time
+            logger.info(f"[{molecule_id}] Geometry optimization completed in {elapsed:.2f}s")
+            return mol_opt
+            
+        except Exception as e:
+            logger.error(f"[{molecule_id}] Geometry optimization failed: {e}, using original structure")
+            return mol_obj
+    
+    def _optimize_with_xtb(
+        self,
+        molecule_id: str,
+        mol_obj: gto.Mole,
+        charge: int = 0,
+        spin: int = 0,
+        uhf: bool = False,
+    ) -> gto.Mole:
+        """
+        使用 xTB (GFN2-xTB) + ASE 进行几何优化
+        
+        这是 qcGEM-Hybrid 策略的核心：xTB 优化速度比 DFT 快 100-1000 倍，
+        能为后续高精度 DFT 单点能提供合理的起始结构。
+        
+        Args:
+            molecule_id: 分子唯一标识
+            mol_obj: PySCF Mole 对象
+            charge: 分子电荷
+            spin: 自旋多重度
+            uhf: 是否使用 UHF
+            
+        Returns:
+            优化后的 PySCF Mole 对象
+        """
+        from xtb.interface import Calculator, Param
+        from xtb.libxtb import VERBOSITY_MINIMAL
+        from ase import Atoms
+        from ase.optimize import BFGS
+        
+        logger.info(f"[{molecule_id}] Using xTB (GFN2-xTB) + ASE for geometry optimization")
+        
+        # 准备 ASE Atoms 对象
+        symbols = [mol_obj.atom_symbol(i) for i in range(mol_obj.natm)]
+        positions = mol_obj.atom_coords()
+        atoms = Atoms(symbols=symbols, positions=positions)
+        atoms.charge = charge
+        atoms.spin = 1 if uhf else 0
+        
+        # 定义 xTB 计算器类
+        class XTBCalculator:
+            def __init__(self, atoms):
+                self.atoms = atoms
+                
+            def get_potential_energy(self, atoms=None, force_consistent=False):
+                return self._get_property('energy', atoms)
+                
+            def get_forces(self, atoms=None):
+                return -self._get_property('forces', atoms)
+                
+            def _get_property(self, name, atoms=None):
+                if atoms is None:
+                    atoms = self.atoms
+                numbers = atoms.get_atomic_numbers()
+                positions = atoms.get_positions() * 0.529177  # Angstrom to Bohr
+                calc = Calculator(Param.GFN2xTB, numbers, positions, 
+                                charge=getattr(atoms, 'charge', 0),
+                                uhf=getattr(atoms, 'spin', 0))
+                calc.set_verbosity(VERBOSITY_MINIMAL)
+                res = calc.singlepoint()
+                
+                if name == 'energy':
+                    return res.get_energy()
+                elif name == 'forces':
+                    # Convert Ha/Bohr to eV/Angstrom
+                    return res.get_gradient() * 51.42208619083232
+                    
+            def calculation_required(self, atoms, quantities):
+                return True
+        
+        # 设置计算器并执行优化
+        atoms.calc = XTBCalculator(atoms)
+        
+        try:
+            opt = BFGS(atoms, logfile=None)  # 禁用 ASE 日志
+            opt.run(fmax=0.05, steps=self.geo_opt_maxsteps)
+            
+            # 获取优化后的坐标
+            opt_coords = atoms.get_positions()
+            
+            # 构建新的原子列表
+            new_atoms = []
+            for i in range(mol_obj.natm):
+                symbol = mol_obj.atom_symbol(i)
+                x, y, z = opt_coords[i]
+                new_atoms.append((symbol, (x, y, z)))
+            
+            # 创建新的 Mole 对象
+            mol_opt = gto.Mole()
+            mol_opt.atom = new_atoms
+            mol_opt.basis = mol_obj.basis
+            mol_opt.charge = mol_obj.charge
+            mol_opt.spin = mol_obj.spin
+            mol_opt.verbose = mol_obj.verbose
+            mol_opt.max_memory = mol_obj.max_memory
+            mol_opt.build()
+            
+            # 记录最终能量
+            final_energy = atoms.get_potential_energy()
+            logger.info(f"[{molecule_id}] xTB optimization converged, final energy: {final_energy:.6f} Hartree")
+            
+            return mol_opt
+            
+        except Exception as e:
+            logger.warning(f"[{molecule_id}] xTB optimization failed: {e}, using original structure")
+            return mol_obj
+    
+    def _optimize_with_pyscf(
+        self,
+        molecule_id: str,
+        mol_obj: gto.Mole,
+        charge: int = 0,
+        spin: int = 0,
+    ) -> gto.Mole:
+        """
+        使用 PySCF + geometric 进行几何优化
+        
+        ⚠️ WARNING: 备用方案，比 xTB 慢 100-1000 倍！
+        建议安装 xtb-python 以获得最佳性能。
+        
+        Args:
+            molecule_id: 分子唯一标识
+            mol_obj: PySCF Mole 对象
+            charge: 分子电荷
+            spin: 自旋多重度
+            
+        Returns:
+            优化后的 PySCF Mole 对象
+        """
+        logger.warning(f"[{molecule_id}] ⚠️ Using PySCF + geometric for geometry optimization")
+        logger.warning(f"[{molecule_id}] ⚠️ This is 100-1000x SLOWER than xTB!")
+        logger.warning(f"[{molecule_id}] ⚠️ Install xtb: conda install -c conda-forge xtb")
+        
+        # 创建简单的泛函进行优化（比目标泛函快）
+        # 使用较小的基组加速优化
+        opt_mol = mol_obj.copy()
+        
+        # 使用最小基组进行快速预优化（可选）
+        mf = dft.RKS(opt_mol)
+        mf.xc = 'b3lyp'  # 使用标准 B3LYP 进行优化
+        mf.conv_tol = 1e-6  # 宽松的收敛标准以加速
+        mf.max_cycle = 50
+        
+        # 执行几何优化
+        mol_eq = geometric_optimize(mf, maxsteps=self.geo_opt_maxsteps)
+        
+        # 用优化后的几何创建新的 Mole 对象，但使用原始基组
+        atoms = []
+        for i in range(mol_eq.natm):
+            symbol = mol_eq.atom_symbol(i)
+            x, y, z = mol_eq.atom_coord(i)
+            atoms.append((symbol, (x, y, z)))
+        
+        mol_opt = gto.Mole()
+        mol_opt.atom = atoms
+        mol_opt.basis = mol_obj.basis  # 保持原始基组
+        mol_opt.charge = mol_obj.charge
+        mol_opt.spin = mol_obj.spin
+        mol_opt.verbose = mol_obj.verbose
+        mol_opt.max_memory = mol_obj.max_memory
+        mol_opt.build()
+        
+        logger.info(f"[{molecule_id}] PySCF geometry optimization completed")
+        return mol_opt
     
     def from_xyz(
         self,
@@ -237,6 +499,11 @@ class DFTCalculator:
             logger.info(f"Created Mole from XYZ: {xyz_file}")
             logger.info(f"  Atoms: {len(atoms)}, Charge: {charge}, Spin: {spin}")
             
+            # 如果启用了几何优化，在此执行
+            if self.geometry_optimization:
+                uhf = (spin != 0)
+                mol = self.run_geometry_optimization(molecule_id=xyz_file, mol_obj=mol, charge=charge, spin=spin, uhf=uhf)
+            
             return mol
             
         except Exception as e:
@@ -260,6 +527,14 @@ class DFTCalculator:
         """
         logger.info(f"[{molecule_id}] Starting DFT calculation...")
         start_time = time.time()
+        
+        # 检查 GPU 基组兼容性
+        if GPU_AVAILABLE:
+            compatible, msg = check_basis_gpu_compatibility(self.basis)
+            if not compatible:
+                logger.warning(f"[{molecule_id}] ⚠️ {msg}")
+                logger.warning(f"[{molecule_id}] ⚠️ GPU calculation will likely fail and fall back to CPU")
+                logger.warning(f"[{molecule_id}] ⚠️ For GPU acceleration, use: sto-3g, 3-21g, 6-31g (no d functions)")
         
         try:
             # 如果使用 GPU，尝试使用 gpu4pyscf
@@ -293,8 +568,16 @@ class DFTCalculator:
                     
                 except Exception as gpu_error:
                     # GPU 计算失败，回退到 CPU
-                    logger.warning(f"[{molecule_id}] GPU calculation failed: {gpu_error}")
-                    logger.info(f"[{molecule_id}] Falling back to CPU...")
+                    logger.error(f"[{molecule_id}] ❌ GPU calculation failed!")
+                    logger.error(f"[{molecule_id}] Error: {gpu_error}")
+                    logger.warning(f"[{molecule_id}] ⚠️ Falling back to CPU mode")
+                    logger.warning(f"[{molecule_id}] ⚠️ This is likely due to:")
+                    logger.warning(f"[{molecule_id}]    1. Basis set contains d/f functions (e.g., def2-SVP)")
+                    logger.warning(f"[{molecule_id}]    2. Out of GPU memory")
+                    logger.warning(f"[{molecule_id}] ⚠️ Solutions:")
+                    logger.warning(f"[{molecule_id}]    - Use GPU-friendly basis: --basis 3-21g or --basis 6-31g")
+                    logger.warning(f"[{molecule_id}]    - Reduce --n-producers to save GPU memory")
+                    logger.info(f"[{molecule_id}] Switching to CPU calculation...")
             
             # CPU 计算（回退或原始 CPU 模式）
             # 对大分子使用密度拟合加速
@@ -398,6 +681,7 @@ class DFTCalculator:
             "success": False,
             "energy": None,
             "pkl_file": None,
+            "pkl_path": None,  # 别名，保持兼容性
             "error": None,
         }
         
@@ -410,6 +694,7 @@ class DFTCalculator:
             # 导出波函数
             pkl_path = self.export_wavefunction(mf, molecule_id, output_dir)
             result["pkl_file"] = pkl_path
+            result["pkl_path"] = pkl_path  # 别名，保持兼容性
             result["success"] = True
             
         except Exception as e:

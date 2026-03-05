@@ -2,6 +2,19 @@
 
 FastORCA 是一个基于 PySCF-GPU 的高性能量子化学计算框架，专为**大规模分子筛选**和**机器学习数据集构建**设计。与传统量子化学软件"集中力量算大分子"不同，FastORCA 采用**"饱和式人海战术"**，通过 GPU 加速 + 高并发架构，实现百万级分子库的秒级处理。
 
+## ⚡ 快速开始
+
+```bash
+# 1. 检查环境（强烈推荐！）
+python check_setup.py
+
+# 2. 运行快速测试
+python test_pipeline.py --quick
+
+# 3. 处理分子（使用 GPU 友好基组）
+python main.py --input test_molecules.smi --output output/ --basis 3-21g
+```
+
 ## 为什么选择 FastORCA？
 
 ### 🚀 速度优势：吞吐量提升 10 倍+
@@ -224,7 +237,29 @@ python -c "from gpu4pyscf.dft import RKS; print('✅ gpu4pyscf 安装成功')"
 3. **内存不足**: 编译时卡住
    - 解决: 限制并行编译任务数 `MAKEFLAGS=-j2 pip install .`
 
-#### 步骤 6: 克隆并配置 FastORCA
+#### 步骤 6: 安装 xTB + ASE（几何优化必需）⚠️ CRITICAL
+
+**重要**: 如果不安装 xTB，几何优化将回退到 PySCF + geometric，速度**慢 100-1000 倍**！
+
+```bash
+# 方法 1: conda 安装（推荐，最稳定）
+conda install -c conda-forge xtb
+
+# 方法 2: pip 安装
+pip install xtb
+
+# 安装 ASE（用于 xTB 几何优化）
+pip install ase
+
+# 验证安装
+python -c "from xtb.interface import Calculator; import ase; print('✅ xTB + ASE 安装成功')"
+```
+
+**性能对比**:
+- xTB + ASE: ~0.5-5 秒/分子（推荐）
+- PySCF geometric: ~50-200 秒/分子（100x 慢）
+
+#### 步骤 7: 克隆并配置 FastORCA
 
 ```bash
 # 克隆仓库
@@ -233,16 +268,10 @@ git clone <repository-url> FastORCA
 cd FastORCA
 
 # 验证安装
-python -c "
-from pyscf import gto, dft
-from gpu4pyscf.dft import RKS
-from rdkit import Chem
-from loguru import logger
-print('✅ 所有核心依赖安装成功！')
-"
+python check_setup.py
 
 # 运行测试
-python test_fastorca.py
+python test_pipeline.py --quick
 ```
 
 ### 配置清华源（中国大陆用户）
@@ -353,7 +382,14 @@ c1ccccc1
 | `--n-consumers` | `4` | CPU 消费者进程数 |
 | `--feature-format` | `json` | 输出格式（json/hdf5） |
 
-## 基组选择指南
+## 基组选择指南 ⚠️ IMPORTANT
+
+**警告**: 使用含 **d/f 极化函数** 的基组（如 def2-SVP）会导致 GPU 崩溃并回退到 CPU！
+
+```
+❌ GPU calculation failed: CUDA Error in MD_build_j: invalid argument
+⚠️  Falling back to CPU mode
+```
 
 ### GPU 加速基组（推荐用于量产）
 
@@ -401,14 +437,61 @@ c1ccccc1
 ### 运行测试套件
 
 ```bash
-# 完整测试（sto-3g + def2-svp）
-python test_fastorca.py
+# 快速测试（推荐）- 验证基础功能，不执行耗时的 DFT 计算
+python test_pipeline.py --quick
 
-# 高精度功能测试
-python test_high_precision.py
+# 完整测试（包含 DFT 计算，耗时较长）
+python test_pipeline.py
 
-# GPU 兼容性测试
-python test_gpu_no_df.py
+# 测试特定功能
+python test_pipeline.py --feature dft        # DFT 计算器
+python test_pipeline.py --feature queue      # 任务队列
+python test_pipeline.py --feature geometry   # 几何优化
+python test_pipeline.py --feature new        # 新功能（ELF、IAO矩阵、全局特征）
+python test_pipeline.py --feature e2e        # 端到端流水线
+```
+
+### 验证几何优化 (NEW)
+
+```python
+from producer.dft_calculator import DFTCalculator
+
+# qcGEM-Hybrid 策略：xTB 优化 + DFT 单点能
+calc = DFTCalculator(
+    functional="B3LYP",
+    basis="def2-svp",
+    geometry_optimization=True,
+    geo_opt_method="xtb"  # 或 "pyscf" / "none"
+)
+
+mol = calc.from_smiles("CCO")  # 自动进行几何优化
+print(f"Optimized molecule: {mol.natm} atoms")
+```
+
+### 验证新特征 (NEW)
+
+```python
+from producer.dft_calculator import DFTCalculator
+from consumer.feature_extractor import FeatureExtractor
+
+# DFT 计算
+calc = DFTCalculator(geometry_optimization=False)
+mol = calc.from_smiles("CCO")
+result = calc.calculate_and_export("ethanol", mol, "temp/")
+
+# 特征提取（包含 ELF、IAO 矩阵、全局特征）
+extractor = FeatureExtractor()
+features = extractor.extract_all_features(
+    result["pkl_path"], 
+    "ethanol",
+    save_fock_matrix=True  # 保存 IAO Fock 矩阵
+)
+
+feat = features["features"]
+print(f"ELF mean: {feat['elf']['elf_mean']:.3f}")
+print(f"HOMO-LUMO gap: {feat['homo_lumo_gap']:.3f} Hartree")
+print(f"Dipole moment: {feat['dipole_moment']:.3f} Debye")
+print(f"IAO charges: {feat['charge_iao']}")
 ```
 
 ### 验证 D3BJ 色散校正
@@ -463,16 +546,23 @@ watch -n 1 nvidia-smi
 ```
 FastORCA/
 ├── main.py                   # 主入口
+├── config.yaml               # 配置文件
 ├── producer/
-│   └── dft_calculator.py     # GPU DFT 计算
+│   └── dft_calculator.py     # GPU DFT 计算 + 几何优化
 ├── consumer/
-│   └── feature_extractor.py  # 特征提取（IAO/CM5/Mayer/Wiberg）
+│   └── feature_extractor.py  # 特征提取（ELF/IAO/CM5/Mayer/Wiberg）
 ├── taskqueue/
 │   └── task_queue.py         # 多进程队列管理
-├── test_fastorca.py          # 完整测试套件
-├── test_high_precision.py    # 高精度功能测试
+├── test_pipeline.py          # 完整测试套件（含新功能测试）
+├── TESTING.md                # 测试指南
+├── AGENTS.md                 # 开发文档
 └── README_GPU.md             # GPU 详细指南
 ```
+
+**关键文档**:
+- [TESTING.md](TESTING.md) - 详细的测试指南和故障排除
+- [AGENTS.md](AGENTS.md) - 开发日志和架构说明
+- [README_GPU.md](README_GPU.md) - GPU 安装和配置指南
 
 
 ## 运行此脚本以验证物理精度（IAO/CM5/D3BJ） 

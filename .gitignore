@@ -8,3 +8,5 @@ test_output/
 utils/__pycache__/
 AGENTS.md
 test_molecules.smi
+fastorca_source.txt
+export_source.py

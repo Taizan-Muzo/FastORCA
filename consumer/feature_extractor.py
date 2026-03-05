@@ -412,6 +412,87 @@ class FeatureExtractor:
             logger.warning(f"IAO charges calculation failed: {e}, returning zeros")
             return np.zeros(mol.natm)
     
+    def extract_iao_matrix(
+        self,
+        mol: gto.Mole,
+        mf: dft.rks.RKS,
+    ) -> dict:
+        """
+        提取 IAO 基组下的矩阵（用于描述轨道相互作用）
+        
+        qcGEM 论文提到的 "non-local internuclear communications" (非局域核间通讯)
+        正是由这些矩阵元素描述的。这对于图神经网络理解共轭效应、电荷转移等至关重要。
+        
+        Args:
+            mol: PySCF Mole 对象
+            mf: 已收敛的 RKS 对象
+            
+        Returns:
+            包含以下键的字典:
+            - iao_fock: Fock 矩阵在 IAO 基下的表示 (n_iao, n_iao)
+            - iao_dm: 密度矩阵在 IAO 基下的表示 (n_iao, n_iao)
+            - iao_charges: IAO 电荷 (natm,)
+            - atomic_slices: 每个原子对应的 IAO 切片
+        """
+        try:
+            from pyscf.lo import iao
+            from pyscf import lo
+            
+            # 构建 IAO 轨道
+            iao_coeff = iao.iao(mol, mf.mo_coeff[:, mf.mo_occ > 0])
+            
+            # 使用 Löwdin 正交化
+            s = mf.get_ovlp()
+            iao_coeff = lo.vec_lowdin(iao_coeff, s)
+            
+            # 获取密度矩阵
+            dm = mf.make_rdm1()
+            if isinstance(dm, tuple):
+                dm = dm[0] + dm[1]
+            
+            # 投影密度矩阵到 IAO 基
+            iao_dm = iao_coeff.T @ s @ dm @ s @ iao_coeff
+            
+            # 计算 Fock 矩阵并在 IAO 基下投影
+            fock = mf.get_fock()
+            iao_fock = iao_coeff.T @ fock @ iao_coeff
+            
+            # 获取 IAO 布居数和电荷
+            iao_pops = np.diag(iao_dm).real
+            ref_mol = iao.reference_mol(mol)
+            natm = mol.natm
+            atomic_pops = np.zeros(natm)
+            atomic_slices = []
+            
+            for i in range(natm):
+                p0, p1 = ref_mol.aoslice_by_atom()[i, 2:]
+                atomic_pops[i] = np.sum(iao_pops[p0:p1])
+                atomic_slices.append((int(p0), int(p1)))
+            
+            charges = np.array([mol.atom_charge(i) for i in range(natm)])
+            iao_charges = charges - atomic_pops
+            
+            result = {
+                "iao_fock": iao_fock.real.tolist(),  # Fock 矩阵：轨道能量和相互作用
+                "iao_dm": iao_dm.real.tolist(),      # 密度矩阵
+                "iao_charges": iao_charges.tolist(),  # IAO 电荷
+                "atomic_slices": atomic_slices,      # 原子切片信息
+                "n_iao": iao_coeff.shape[1],         # IAO 数量
+            }
+            
+            logger.debug(f"IAO matrix extracted: Fock ({iao_fock.shape}), DM ({iao_dm.shape})")
+            return result
+            
+        except Exception as e:
+            logger.warning(f"IAO matrix extraction failed: {e}")
+            return {
+                "iao_fock": None,
+                "iao_dm": None,
+                "iao_charges": np.zeros(mol.natm).tolist(),
+                "atomic_slices": [],
+                "n_iao": 0,
+            }
+    
     def extract_cm5_charges(
         self,
         mol: gto.Mole,
@@ -487,10 +568,219 @@ class FeatureExtractor:
             logger.warning(f"CM5 charges calculation failed: {e}, returning Hirshfeld charges")
             return hirshfeld_charges if 'hirshfeld_charges' in locals() else np.zeros(mol.natm)
     
+    def extract_elf_features(
+        self,
+        mol: gto.Mole,
+        mf: dft.rks.RKS,
+        grid_level: int = 2,
+    ) -> dict:
+        """
+        计算 ELF (Electron Localization Function) 特征
+        
+        ELF 是描述电子在空间中定域化程度的关键描述符，qcGEM 论文明确使用。
+        高 ELF 值表示电子定域（孤对电子、共价键），低值表示离域。
+        
+        由于 ELF 是 3D 空间函数，我们提取以下压缩特征：
+        1. 原子处的 ELF 值（原子中心的电子定域程度）
+        2. 键中点的 ELF 值（键区域的电子定域程度）
+        
+        Args:
+            mol: PySCF Mole 对象
+            mf: 已收敛的 RKS 对象
+            grid_level: 网格密度等级 (0-3, 越高越密)
+            
+        Returns:
+            包含 ELF 特征的字典:
+            - elf_at_atoms: 原子处的 ELF 值 (natm,)
+            - elf_bond_midpoints: 键中点的 ELF 值 (n_bonds,)
+            - elf_mean: 平均 ELF 值
+            - elf_max: 最大 ELF 值
+            - bond_pairs: 键原子对列表
+        """
+        try:
+            from pyscf.dft import numint, gen_grid
+            
+            # 获取密度矩阵
+            dm = mf.make_rdm1()
+            if isinstance(dm, tuple):
+                dm = dm[0] + dm[1]
+            
+            # 创建积分网格
+            grids = gen_grid.Grids(mol)
+            grids.level = grid_level
+            grids.build()
+            
+            # 计算 ELF 在网格上的值
+            # ELF = 1 / (1 + (D/D_h)^2)
+            # 其中 D 是实际动能密度，D_h 是均匀电子气动能密度
+            
+            # 计算电子密度和梯度
+            rho = numint.eval_rho(mol, numint.eval_ao(mol, grids.coords), dm, xctype='LDA')
+            
+            # 计算梯度 (用于动能密度)
+            ao = numint.eval_ao(mol, grids.coords, deriv=1)
+            rho_grad = numint.eval_rho(mol, ao, dm, xctype='GGA', with_lapl=False)
+            
+            # 计算 Weizsäcker 动能密度（近似 ELF 分子）
+            # D = |∇ρ|^2 / (8 * ρ)
+            grad_rho_sq = np.sum(rho_grad[1:4]**2, axis=0)
+            
+            # 避免除零
+            rho_safe = np.where(rho < 1e-30, 1e-30, rho)
+            D_weizsacker = grad_rho_sq / (8.0 * rho_safe)
+            
+            # Thomas-Fermi 动能密度（均匀电子气参考）
+            # D_TF = (3/10) * (3π^2)^(2/3) * ρ^(5/3)
+            D_TF = (3.0/10.0) * (3.0 * np.pi**2)**(2.0/3.0) * rho_safe**(5.0/3.0)
+            
+            # ELF
+            D_ratio = D_weizsacker / D_TF
+            elf_values = 1.0 / (1.0 + D_ratio**2)
+            
+            # 提取原子处的 ELF 值
+            elf_at_atoms = []
+            for i in range(mol.natm):
+                coord = mol.atom_coord(i)
+                # 找到最近的网格点
+                distances = np.sum((grids.coords - coord)**2, axis=1)
+                nearest_idx = np.argmin(distances)
+                elf_at_atoms.append(float(elf_values[nearest_idx]))
+            
+            # 提取键中点的 ELF 值
+            elf_bond_midpoints = []
+            bond_pairs = []
+            
+            # 使用 Mayer 键级识别键
+            mayer_bo = self.extract_mayer_bond_orders(mol, mf)
+            for i in range(mol.natm):
+                for j in range(i+1, mol.natm):
+                    if mayer_bo[i, j] > 0.3:  # 键级阈值
+                        # 计算中点
+                        mid_point = (mol.atom_coord(i) + mol.atom_coord(j)) / 2.0
+                        # 找到最近的网格点
+                        distances = np.sum((grids.coords - mid_point)**2, axis=1)
+                        nearest_idx = np.argmin(distances)
+                        elf_bond_midpoints.append(float(elf_values[nearest_idx]))
+                        bond_pairs.append((i, j))
+            
+            result = {
+                "elf_at_atoms": elf_at_atoms,
+                "elf_bond_midpoints": elf_bond_midpoints,
+                "bond_pairs": bond_pairs,
+                "elf_mean": float(np.mean(elf_values)),
+                "elf_max": float(np.max(elf_values)),
+                "elf_min": float(np.min(elf_values)),
+            }
+            
+            logger.debug(f"ELF calculated: {len(elf_at_atoms)} atoms, {len(elf_bond_midpoints)} bonds")
+            return result
+            
+        except Exception as e:
+            logger.warning(f"ELF calculation failed: {e}")
+            return {
+                "elf_at_atoms": [],
+                "elf_bond_midpoints": [],
+                "bond_pairs": [],
+                "elf_mean": 0.0,
+                "elf_max": 0.0,
+                "elf_min": 0.0,
+            }
+    
+    def extract_global_features(
+        self,
+        mol: gto.Mole,
+        mf: dft.rks.RKS,
+    ) -> dict:
+        """
+        提取分子级全局特征
+        
+        这些特征描述整个分子的电子结构性质，对图神经网络的图级任务很重要。
+        
+        Args:
+            mol: PySCF Mole 对象
+            mf: 已收敛的 RKS 对象
+            
+        Returns:
+            包含全局特征的字典:
+            - homo_energy: HOMO 能级
+            - lumo_energy: LUMO 能级
+            - homo_lumo_gap: HOMO-LUMO 能隙
+            - dipole_moment: 偶极矩 (Debye)
+            - quadrupole_moment: 四极矩 (可选)
+            - total_energy: 总能量
+        """
+        try:
+            features = {}
+            
+            # 1. HOMO/LUMO 能级
+            mo_energy = mf.mo_energy
+            mo_occ = mf.mo_occ
+            
+            # 找到 HOMO 和 LUMO
+            occupied_idx = np.where(mo_occ > 0)[0]
+            virtual_idx = np.where(mo_occ == 0)[0]
+            
+            if len(occupied_idx) > 0:
+                homo_idx = occupied_idx[-1]
+                features["homo_energy"] = float(mo_energy[homo_idx])
+            else:
+                features["homo_energy"] = None
+            
+            if len(virtual_idx) > 0:
+                lumo_idx = virtual_idx[0]
+                features["lumo_energy"] = float(mo_energy[lumo_idx])
+            else:
+                features["lumo_energy"] = None
+            
+            if features["homo_energy"] is not None and features["lumo_energy"] is not None:
+                features["homo_lumo_gap"] = features["lumo_energy"] - features["homo_energy"]
+            else:
+                features["homo_lumo_gap"] = None
+            
+            # 2. 偶极矩
+            try:
+                dipole = mf.dip_moment()
+                if dipole is not None:
+                    features["dipole_moment"] = float(np.linalg.norm(dipole))
+                    features["dipole_vector"] = dipole.tolist()
+                else:
+                    features["dipole_moment"] = 0.0
+                    features["dipole_vector"] = [0.0, 0.0, 0.0]
+            except Exception as dip_error:
+                logger.debug(f"Dipole moment calculation failed: {dip_error}")
+                features["dipole_moment"] = 0.0
+                features["dipole_vector"] = [0.0, 0.0, 0.0]
+            
+            # 3. 总能量
+            features["total_energy"] = float(mf.e_tot) if hasattr(mf, 'e_tot') else None
+            
+            # 4. 电子数
+            features["n_electrons"] = int(mol.nelectron)
+            
+            # 5. SCF 收敛状态
+            features["scf_converged"] = bool(mf.converged) if hasattr(mf, 'converged') else None
+            
+            logger.debug(f"Global features extracted: E_HOMO={features.get('homo_energy')}, gap={features.get('homo_lumo_gap')}")
+            return features
+            
+        except Exception as e:
+            logger.warning(f"Global features extraction failed: {e}")
+            return {
+                "homo_energy": None,
+                "lumo_energy": None,
+                "homo_lumo_gap": None,
+                "dipole_moment": None,
+                "dipole_vector": None,
+                "total_energy": None,
+                "n_electrons": mol.nelectron if hasattr(mol, 'nelectron') else None,
+                "scf_converged": None,
+            }
+    
     def extract_all_features(
         self,
         pkl_path: str,
         molecule_id: str,
+        save_fock_matrix: bool = False,
     ) -> Dict[str, Any]:
         """
         从 pickle 文件提取所有特征
@@ -498,6 +788,7 @@ class FeatureExtractor:
         Args:
             pkl_path: pickle 文件路径
             molecule_id: 分子标识
+            save_fock_matrix: 是否保存 Fock 矩阵（数据量大，谨慎使用）
             
         Returns:
             包含所有特征的字典
@@ -529,13 +820,27 @@ class FeatureExtractor:
             features["mayer_bond_orders"] = self.extract_mayer_bond_orders(mol, mf).tolist()
             features["wiberg_bond_orders"] = self.extract_wiberg_bond_orders(mol, mf).tolist()
             
-            # 3. 分子信息
+            # 3. ELF 电子定域化函数 (qcGEM 关键特征)
+            elf_features = self.extract_elf_features(mol, mf)
+            features["elf"] = elf_features
+            
+            # 4. IAO 矩阵 (轨道相互作用信息)
+            iao_matrix = self.extract_iao_matrix(mol, mf)
+            features["iao_charges"] = iao_matrix["iao_charges"]
+            if save_fock_matrix and iao_matrix["iao_fock"] is not None:
+                features["iao_fock_matrix"] = iao_matrix["iao_fock"]  # 大矩阵，可选保存
+            features["iao_atomic_slices"] = iao_matrix["atomic_slices"]
+            
+            # 5. 全局分子特征
+            global_features = self.extract_global_features(mol, mf)
+            features.update(global_features)
+            
+            # 6. 分子基本信息
             features["natm"] = mol.natm
-            features["energy"] = float(mf.e_tot) if hasattr(mf, 'e_tot') else None
             features["atom_symbols"] = [mol.atom_symbol(i) for i in range(mol.natm)]
             features["atom_coords"] = mol.atom_coords().tolist()
             
-            # 4. 色散校正信息
+            # 7. 色散校正信息
             features["dispersion_correction"] = hasattr(mf, 'disp') and mf.disp is not None
             
             result["features"] = features
@@ -547,6 +852,8 @@ class FeatureExtractor:
         except Exception as e:
             result["error"] = str(e)
             logger.error(f"[{molecule_id}] Feature extraction failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
         
         return result
     

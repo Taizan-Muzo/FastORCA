@@ -9,6 +9,11 @@ h5py>=3.8.0
 # PyTorch (for gpu4pyscf)
 torch>=2.0.0
 
+# Geometry Optimization (NEW)
+xtb>=22.1                # Fast semi-empirical geometry optimization (GFN2-xTB)
+ase>=3.22.0              # Atomic Simulation Environment for xTB optimization
+geometric>=1.0           # PySCF geometry optimization engine
+
 # Async queue (optional, for distributed mode)
 celery>=5.3.0
 redis>=4.5.0
