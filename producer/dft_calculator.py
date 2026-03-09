@@ -402,10 +402,8 @@ class DFTCalculator:
         spin: int = 0,
     ) -> gto.Mole:
         """
-        使用 PySCF + geometric 进行几何优化
-        
-        ⚠️ WARNING: 备用方案，比 xTB 慢 100-1000 倍！
-        建议安装 xtb-python 以获得最佳性能。
+        [Modified] 使用 PySCF 进行几何优化。
+        逻辑变更：优先尝试 GPU 加速 (gpu4pyscf)，失败则回退到 CPU。
         
         Args:
             molecule_id: 分子唯一标识
@@ -416,19 +414,81 @@ class DFTCalculator:
         Returns:
             优化后的 PySCF Mole 对象
         """
-        logger.warning(f"[{molecule_id}] ⚠️ Using PySCF + geometric for geometry optimization")
+        # ---------------------------------------------------------
+        # 1. 尝试 GPU 加速路径
+        # ---------------------------------------------------------
+        if GPU_AVAILABLE:
+            logger.info(f"[{molecule_id}] 🚀 Attempting GPU-accelerated Geometry Optimization (Full DFT)...")
+            try:
+                # 复制分子对象用于优化
+                opt_mol = mol_obj.copy()
+                
+                # 使用 GPU 版本的 RKS 求解器
+                # 注意：此处必须使用 GPU_RKS 类
+                mf_gpu = GPU_RKS(opt_mol)
+                
+                # 设置计算参数
+                mf_gpu.xc = self.functional  # 使用目标泛函进行优化
+                mf_gpu.conv_tol = 1e-6  # 几何优化通常不需要过高的 SCF 收敛精度
+                mf_gpu.max_cycle = 50   # 限制 SCF 步数防止死循环
+                
+                # [关键] 启用色散校正 (如果支持)
+                # GPU 版本通常也支持 disp 参数，如果不支持需做 hasattr 检查
+                try:
+                    mf_gpu.disp = 'd3bj'
+                    logger.debug(f"[{molecule_id}] D3BJ dispersion correction enabled for GPU optimization")
+                except Exception:
+                    pass
+                
+                # 执行几何优化
+                # geometric_solver 会自动调用 mf.Gradients()，在 gpu4pyscf 中这是 GPU 加速的
+                mol_eq = geometric_optimize(mf_gpu, maxsteps=self.geo_opt_maxsteps)
+                
+                # 用优化后的几何创建新的 Mole 对象，但使用原始基组
+                atoms = []
+                for i in range(mol_eq.natm):
+                    symbol = mol_eq.atom_symbol(i)
+                    x, y, z = mol_eq.atom_coord(i)
+                    atoms.append((symbol, (x, y, z)))
+                
+                mol_opt = gto.Mole()
+                mol_opt.atom = atoms
+                mol_opt.basis = mol_obj.basis  # 保持原始基组
+                mol_opt.charge = mol_obj.charge
+                mol_opt.spin = mol_obj.spin
+                mol_opt.verbose = mol_obj.verbose
+                mol_opt.max_memory = mol_obj.max_memory
+                mol_opt.build()
+                
+                logger.info(f"[{molecule_id}] ✅ GPU Optimization success!")
+                return mol_opt
+                
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] ⚠️ GPU Optimization failed: {e}")
+                logger.warning(f"[{molecule_id}] 🔄 Falling back to CPU optimization...")
+                # 继续向下执行 CPU 逻辑...
+        
+        # ---------------------------------------------------------
+        # 2. CPU 回退路径 (原有的逻辑)
+        # ---------------------------------------------------------
+        logger.info(f"[{molecule_id}] Running CPU-based Geometry Optimization (Slow)...")
         logger.warning(f"[{molecule_id}] ⚠️ This is 100-1000x SLOWER than xTB!")
         logger.warning(f"[{molecule_id}] ⚠️ Install xtb: conda install -c conda-forge xtb")
         
         # 创建简单的泛函进行优化（比目标泛函快）
-        # 使用较小的基组加速优化
         opt_mol = mol_obj.copy()
         
-        # 使用最小基组进行快速预优化（可选）
+        # 使用 CPU 版本的 RKS
         mf = dft.RKS(opt_mol)
-        mf.xc = 'b3lyp'  # 使用标准 B3LYP 进行优化
+        mf.xc = self.functional  # 使用目标泛函
         mf.conv_tol = 1e-6  # 宽松的收敛标准以加速
         mf.max_cycle = 50
+        
+        # 启用色散校正
+        try:
+            mf.disp = 'd3bj'
+        except Exception:
+            pass
         
         # 执行几何优化
         mol_eq = geometric_optimize(mf, maxsteps=self.geo_opt_maxsteps)
@@ -449,7 +509,7 @@ class DFTCalculator:
         mol_opt.max_memory = mol_obj.max_memory
         mol_opt.build()
         
-        logger.info(f"[{molecule_id}] PySCF geometry optimization completed")
+        logger.info(f"[{molecule_id}] CPU geometry optimization completed")
         return mol_opt
     
     def from_xyz(
