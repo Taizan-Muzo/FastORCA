@@ -25,16 +25,17 @@ except ImportError:
     logger.warning("gpu4pyscf not available, falling back to CPU PySCF")
     GPU_AVAILABLE = False
 
-from pyscf import dft
+from pyscf import dft, grad
 from pyscf.dft import rks
 
-# 几何优化相关导入
+# VeloxChem 导入（用于几何优化）
 try:
-    from pyscf.geomopt.geometric_solver import optimize as geometric_optimize
-    GEOMETRIC_AVAILABLE = True
+    import veloxchem as vlx
+    VELOCHEM_AVAILABLE = True
+    logger.info("VeloxChem loaded, GPU-accelerated geometry optimization available")
 except ImportError:
-    GEOMETRIC_AVAILABLE = False
-    logger.warning("geometric not available, PySCF geometry optimization disabled")
+    VELOCHEM_AVAILABLE = False
+    logger.warning("VeloxChem not available, geometry optimization will use xTB or CPU fallback")
 
 try:
     from xtb.interface import Calculator
@@ -45,8 +46,8 @@ except ImportError:
     XTB_AVAILABLE = False
     logger.warning("=" * 70)
     logger.warning("xtb-python NOT AVAILABLE!")
-    logger.warning("Geometry optimization will fall back to PySCF + geometric")
-    logger.warning("This will be 100-1000x SLOWER!")
+    logger.warning("Geometry optimization will fall back to VeloxChem (GPU) or be disabled")
+    logger.warning("This will be 10-100x SLOWER than xTB!")
     logger.warning("-" * 70)
     logger.warning("To install xTB:")
     logger.warning("  conda install -c conda-forge xtb")
@@ -147,10 +148,10 @@ class DFTCalculator:
         # 检查几何优化可用性
         if geometry_optimization:
             if geo_opt_method == "xtb" and not XTB_AVAILABLE:
-                logger.warning("xtb-python not available, falling back to pyscf geometric")
-                self.geo_opt_method = "pyscf" if GEOMETRIC_AVAILABLE else "none"
-            if geo_opt_method == "pyscf" and not GEOMETRIC_AVAILABLE:
-                logger.warning("geometric not available, disabling geometry optimization")
+                logger.warning("xtb-python not available, falling back to pyscf veloxchem")
+                self.geo_opt_method = "pyscf" if VELOCHEM_AVAILABLE else "none"
+            if geo_opt_method == "pyscf" and not VELOCHEM_AVAILABLE:
+                logger.warning("veloxchem not available, disabling geometry optimization")
                 self.geometry_optimization = False
         
         # 检查 GPU 基组兼容性
@@ -273,8 +274,8 @@ class DFTCalculator:
             if self.geo_opt_method == "xtb" and XTB_AVAILABLE:
                 # 使用 xTB 进行快速几何优化 (qcGEM-Hybrid 策略)
                 mol_opt = self._optimize_with_xtb(molecule_id, mol_obj, charge, spin, uhf)
-            elif self.geo_opt_method == "pyscf" and GEOMETRIC_AVAILABLE:
-                # 使用 PySCF + geometric 进行几何优化
+            elif self.geo_opt_method == "pyscf" and VELOCHEM_AVAILABLE:
+                # 使用 VeloxChem 进行 GPU 加速几何优化
                 mol_opt = self._optimize_with_pyscf(molecule_id, mol_obj, charge, spin)
             else:
                 logger.warning(f"[{molecule_id}] No geometry optimization method available, skipping")
@@ -402,115 +403,146 @@ class DFTCalculator:
         spin: int = 0,
     ) -> gto.Mole:
         """
-        [Modified] 使用 PySCF 进行几何优化。
-        逻辑变更：优先尝试 GPU 加速 (gpu4pyscf)，失败则回退到 CPU。
-        
-        Args:
-            molecule_id: 分子唯一标识
-            mol_obj: PySCF Mole 对象
-            charge: 分子电荷
-            spin: 自旋多重度
-            
-        Returns:
-            优化后的 PySCF Mole 对象
+        使用 VeloxChem + SciPy 进行几何优化 (深度 Debug 版)
         """
-        # ---------------------------------------------------------
-        # 1. 尝试 GPU 加速路径
-        # ---------------------------------------------------------
-        if GPU_AVAILABLE:
-            logger.info(f"[{molecule_id}] 🚀 Attempting GPU-accelerated Geometry Optimization (Full DFT)...")
-            try:
-                # 复制分子对象用于优化
-                opt_mol = mol_obj.copy()
-                
-                # 使用 GPU 版本的 RKS 求解器
-                # 注意：此处必须使用 GPU_RKS 类
-                mf_gpu = GPU_RKS(opt_mol)
-                
-                # 设置计算参数
-                mf_gpu.xc = self.functional  # 使用目标泛函进行优化
-                mf_gpu.conv_tol = 1e-6  # 几何优化通常不需要过高的 SCF 收敛精度
-                mf_gpu.max_cycle = 50   # 限制 SCF 步数防止死循环
-                
-                # [关键] 启用色散校正 (如果支持)
-                # GPU 版本通常也支持 disp 参数，如果不支持需做 hasattr 检查
-                try:
-                    mf_gpu.disp = 'd3bj'
-                    logger.debug(f"[{molecule_id}] D3BJ dispersion correction enabled for GPU optimization")
-                except Exception:
-                    pass
-                
-                # 执行几何优化
-                # geometric_solver 会自动调用 mf.Gradients()，在 gpu4pyscf 中这是 GPU 加速的
-                mol_eq = geometric_optimize(mf_gpu, maxsteps=self.geo_opt_maxsteps)
-                
-                # 用优化后的几何创建新的 Mole 对象，但使用原始基组
-                atoms = []
-                for i in range(mol_eq.natm):
-                    symbol = mol_eq.atom_symbol(i)
-                    x, y, z = mol_eq.atom_coord(i)
-                    atoms.append((symbol, (x, y, z)))
-                
-                mol_opt = gto.Mole()
-                mol_opt.atom = atoms
-                mol_opt.basis = mol_obj.basis  # 保持原始基组
-                mol_opt.charge = mol_obj.charge
-                mol_opt.spin = mol_obj.spin
-                mol_opt.verbose = mol_obj.verbose
-                mol_opt.max_memory = mol_obj.max_memory
-                mol_opt.build()
-                
-                logger.info(f"[{molecule_id}] ✅ GPU Optimization success!")
-                return mol_opt
-                
-            except Exception as e:
-                logger.warning(f"[{molecule_id}] ⚠️ GPU Optimization failed: {e}")
-                logger.warning(f"[{molecule_id}] 🔄 Falling back to CPU optimization...")
-                # 继续向下执行 CPU 逻辑...
+        import veloxchem as vlx
+        from scipy.optimize import minimize
+        import traceback  # 引入 traceback 追踪真实报错行
         
-        # ---------------------------------------------------------
-        # 2. CPU 回退路径 (原有的逻辑)
-        # ---------------------------------------------------------
-        logger.info(f"[{molecule_id}] Running CPU-based Geometry Optimization (Slow)...")
-        logger.warning(f"[{molecule_id}] ⚠️ This is 100-1000x SLOWER than xTB!")
-        logger.warning(f"[{molecule_id}] ⚠️ Install xtb: conda install -c conda-forge xtb")
+        logger.info(f"[{molecule_id}] 🚀 DEBUG MODE: VeloxChem Optimization Started")
         
-        # 创建简单的泛函进行优化（比目标泛函快）
-        opt_mol = mol_obj.copy()
-        
-        # 使用 CPU 版本的 RKS
-        mf = dft.RKS(opt_mol)
-        mf.xc = self.functional  # 使用目标泛函
-        mf.conv_tol = 1e-6  # 宽松的收敛标准以加速
-        mf.max_cycle = 50
-        
-        # 启用色散校正
         try:
-            mf.disp = 'd3bj'
-        except Exception:
-            pass
-        
-        # 执行几何优化
-        mol_eq = geometric_optimize(mf, maxsteps=self.geo_opt_maxsteps)
-        
-        # 用优化后的几何创建新的 Mole 对象，但使用原始基组
-        atoms = []
-        for i in range(mol_eq.natm):
-            symbol = mol_eq.atom_symbol(i)
-            x, y, z = mol_eq.atom_coord(i)
-            atoms.append((symbol, (x, y, z)))
-        
-        mol_opt = gto.Mole()
-        mol_opt.atom = atoms
-        mol_opt.basis = mol_obj.basis  # 保持原始基组
-        mol_opt.charge = mol_obj.charge
-        mol_opt.spin = mol_obj.spin
-        mol_opt.verbose = mol_obj.verbose
-        mol_opt.max_memory = mol_obj.max_memory
-        mol_opt.build()
-        
-        logger.info(f"[{molecule_id}] CPU geometry optimization completed")
-        return mol_opt
+            # 1. 提取 PySCF 数据
+            symbols = [mol_obj.atom_symbol(i) for i in range(mol_obj.natm)]
+            init_coords_ang = mol_obj.atom_coords() * 0.52917721092
+            n_atoms = len(symbols)
+            
+            logger.info(f"[{molecule_id}] [DEBUG 1] PySCF atom count: {n_atoms}")
+            logger.info(f"[{molecule_id}] [DEBUG 2] Init coords shape: {init_coords_ang.shape}")
+            
+            # 2. 构造最最纯净的坐标字符串（绝对不要加原子数和注释！）
+            xyz_lines = []
+            for s, (x, y, z) in zip(symbols, init_coords_ang):
+                xyz_lines.append(f"{s:<2} {x:14.9f} {y:14.9f} {z:14.9f}")
+            xyz_content = "\n".join(xyz_lines)
+            
+            # 3. 构造 VeloxChem 对象
+            vlx_mol = vlx.Molecule.read_str(xyz_content)
+            
+            # 3. 构造 VeloxChem 对象
+            vlx_mol = vlx.Molecule.read_str(xyz_content)
+            logger.info(f"[{molecule_id}] [DEBUG 3] VeloxChem parsed atoms: {vlx_mol.number_of_atoms()}")
+            
+            if charge != 0:
+                vlx_mol.set_charge(charge)
+            
+            basis_name = str(self.basis).lower()
+            basis = vlx.MolecularBasis.read(vlx_mol, basis_name)
+            
+            scf_drv = vlx.ScfRestrictedDriver()
+            scf_drv.xcfun = self.functional.lower()
+            scf_drv.conv_thresh = 1e-6
+            scf_drv.max_iter = 100
+            # --- 新增的 GPU 保护设置 ---
+            # 1. 降低积分网格级别（默认通常是 4，我们降到 3，大幅减少内存占用，精度影响极小）
+            scf_drv.grid_level = 3
+            # 2. 关闭一些可能导致 GPU 越界的并行猜测加速
+            scf_drv.reduced_basis_scf = False
+            grad_drv = vlx.GradientDriver()
+            
+            iteration = [0]
+            
+            # 4. 优化闭包函数
+            # 3. 闭包函数：改用“每步重新实例化”策略
+            def cost_function(coords_1d):
+                try:
+                    # 重新组装 XYZ 字符串
+                    curr_coords_ang = np.array(coords_1d, dtype=float).reshape(n_atoms, 3)
+                    
+                    # 重新生成这一个 step 的 XYZ
+                    step_xyz_lines = []
+                    for s, (x, y, z) in zip(symbols, curr_coords_ang):
+                        step_xyz_lines.append(f"{s} {x:.8f} {y:.8f} {z:.8f}")
+                    step_xyz_content = "\n".join(step_xyz_lines)
+                    
+                    # 每次迭代创建一个新的 molecule 对象！绕过 set_coordinates 报错
+                    step_mol = vlx.Molecule.read_str(step_xyz_content)
+                    if charge != 0:
+                        step_mol.set_charge(charge)
+                    
+                    # 重新读取 basis (因为分子换了)
+                    step_basis = vlx.MolecularBasis.read(step_mol, basis_name)
+                    
+                    # 计算能量
+                    scf_results = scf_drv.compute(step_mol, step_basis)
+                    energy = float(scf_results['energy'])
+                    
+                    # 计算梯度
+                    grad_results = grad_drv.compute(step_mol, step_basis, scf_results)
+                    raw_grad = grad_results['gradient']
+                    
+                    # 提取梯度
+                    clean_grad = np.zeros((n_atoms, 3), dtype=float)
+                    for i in range(n_atoms):
+                        clean_grad[i, 0] = float(raw_grad[i][0])
+                        clean_grad[i, 1] = float(raw_grad[i][1])
+                        clean_grad[i, 2] = float(raw_grad[i][2])
+                    
+                    grad_1d = clean_grad.flatten()
+                    
+                    iteration[0] += 1
+                    logger.debug(f"[{molecule_id}] Opt step {iteration[0]}: E = {energy:.8f}")
+                    
+                    return energy, grad_1d
+                    
+                except Exception as inner_e:
+                    logger.error(f"[{molecule_id}] [CRASH IN COST_FUNCTION] {inner_e}")
+                    logger.error(traceback.format_exc())
+                    raise
+
+            # 5. 执行 SciPy 优化
+            x0 = np.array(init_coords_ang, dtype=float).flatten()
+            logger.info(f"[{molecule_id}] [DEBUG 6] SciPy x0 shape: {x0.shape}")
+            
+            res = minimize(
+                cost_function,
+                x0,
+                method='L-BFGS-B',
+                jac=True,
+                options={'maxiter': self.geo_opt_maxsteps, 'disp': False}
+            )
+            
+            # 6. 回写坐标
+            final_coords_ang = res.x.reshape(n_atoms, 3) 
+            atoms = []
+            for i, symbol in enumerate(symbols):
+                x, y, z = final_coords_ang[i]
+                atoms.append((symbol, (x, y, z)))
+            
+            mol_opt = gto.Mole()
+            mol_opt.atom = atoms
+            mol_opt.basis = mol_obj.basis
+            mol_opt.charge = mol_obj.charge
+            mol_opt.spin = mol_obj.spin
+            mol_opt.verbose = mol_obj.verbose
+            mol_opt.max_memory = mol_obj.max_memory
+            mol_opt.build()
+            
+            logger.info(f"[{molecule_id}] ✅ VeloxChem optimization completed!")
+            return mol_opt
+            
+        except ImportError as ie:
+            logger.error(f"[{molecule_id}] ❌ VeloxChem not available: {ie}")
+            raise
+            
+        except Exception as e:
+            # 打印最致命的 Traceback！
+            logger.error(f"[{molecule_id}] ❌ VeloxChem optimization failed: {e}")
+            logger.error(f"[{molecule_id}] === TRACEBACK START ===")
+            logger.error(traceback.format_exc())
+            logger.error(f"[{molecule_id}] === TRACEBACK END ===")
+            logger.warning(f"[{molecule_id}] 🔄 Consider using xTB method instead: geo_opt_method='xtb'")
+            raise
     
     def from_xyz(
         self,
@@ -601,7 +633,8 @@ class DFTCalculator:
             if GPU_AVAILABLE:
                 logger.info(f"[{molecule_id}] Trying GPU acceleration...")
                 try:
-                    mf = GPU_RKS(mol_obj)
+                    # 启用密度拟合 (RI-J) 以提高兼容性并加速
+                    mf = GPU_RKS(mol_obj).density_fit()
                     mf.xc = self.functional
                     mf.conv_tol = self.scf_conv_tol
                     mf.max_cycle = 100
