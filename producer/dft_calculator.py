@@ -1,6 +1,6 @@
 """
 GPU DFT Calculator Module
-使用 gpu4pyscf 进行高速量子化学计算
+使用 gpu4pyscf 进行高速量子化学计算 (Hybrid Architecture)
 """
 
 import os
@@ -9,12 +9,11 @@ from pathlib import Path
 from typing import Optional, Union
 import tempfile
 import time
-
+import cupy
 from loguru import logger
 import numpy as np
 
 # GPU PySCF imports
-# 注意：gpu4pyscf 使用 pyscf 的 gto，但使用自己的 dft
 from pyscf import gto, lib
 
 try:
@@ -28,15 +27,7 @@ except ImportError:
 from pyscf import dft, grad
 from pyscf.dft import rks
 
-# VeloxChem 导入（用于几何优化）
-try:
-    import veloxchem as vlx
-    VELOCHEM_AVAILABLE = True
-    logger.info("VeloxChem loaded, GPU-accelerated geometry optimization available")
-except ImportError:
-    VELOCHEM_AVAILABLE = False
-    logger.warning("VeloxChem not available, geometry optimization will use xTB or CPU fallback")
-
+# xTB 导入
 try:
     from xtb.interface import Calculator
     from xtb.libxtb import VERBOSITY_MINIMAL
@@ -46,29 +37,13 @@ except ImportError:
     XTB_AVAILABLE = False
     logger.warning("=" * 70)
     logger.warning("xtb-python NOT AVAILABLE!")
-    logger.warning("Geometry optimization will fall back to VeloxChem (GPU) or be disabled")
-    logger.warning("This will be 10-100x SLOWER than xTB!")
+    logger.warning("Geometry optimization will fall back to PySCF (GPU Hybrid) or be disabled")
     logger.warning("-" * 70)
-    logger.warning("To install xTB:")
-    logger.warning("  conda install -c conda-forge xtb")
-    logger.warning("  or")
-    logger.warning("  pip install xtb")
-    logger.warning("=" * 70)
 
 # GPU 基组兼容性提示
 def check_basis_gpu_compatibility(basis: str) -> tuple[bool, str]:
-    """
-    检查基组是否与 GPU 模式兼容
-    
-    Returns:
-        (is_compatible, message)
-    """
     basis_lower = basis.lower()
-    
-    # 已知完全支持 GPU 的基组（无 d/f 极化函数）
     gpu_friendly = ['sto-3g', '3-21g', '6-31g', '6-311g', 'mini', 'midi']
-    
-    # 已知可能有问题（含 d/f 函数）
     gpu_limited = ['def2-svp', 'def2-tzvp', 'def2-svpp', 'def2-tzvpp',
                    'cc-pvdz', 'cc-pvtz', 'aug-cc-pvdz', 'aug-cc-pvtz']
     
@@ -78,18 +53,15 @@ def check_basis_gpu_compatibility(basis: str) -> tuple[bool, str]:
     
     for b in gpu_limited:
         if b in basis_lower:
-            return False, f"基组 {basis} 包含 d/f 极化函数，可能触发 GPU 回退到 CPU"
-    
-    # 默认警告
+            return False, f"基组 {basis} 包含 d/f 极化函数，需强制开启笛卡尔坐标 (cart=True)"
+            
     if GPU_AVAILABLE:
-        return True, f"基组 {basis} GPU 兼容性未知，将尝试 GPU 计算，失败时自动回退 CPU"
+        return True, f"基组 {basis} GPU 兼容性未知"
     else:
-        return False, "GPU 不可用，使用 CPU 计算"
+        return False, "GPU 不可用"
 
-from pyscf import lib
 import pickle
 
-# RDKit for SMILES processing
 try:
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -100,37 +72,17 @@ except ImportError:
 
 
 class DFTCalculator:
-    """
-    GPU 加速的 DFT 计算器
-    
-    使用 gpu4pyscf 在 GPU 上执行 DFT 计算，
-    然后将结果转回 CPU 并导出波函数文件
-    """
-    
     def __init__(
         self,
         functional: str = "B3LYP",
         basis: str = "def2-SVP",
         verbose: int = 3,
-        max_memory: int = 8000,  # MB
+        max_memory: int = 8000, 
         scf_conv_tol: float = 1e-9,
         geometry_optimization: bool = True,
-        geo_opt_method: str = "xtb",  # "xtb", "pyscf", "none"
+        geo_opt_method: str = "xtb", 
         geo_opt_maxsteps: int = 100,
     ):
-        """
-        初始化 DFT 计算器
-        
-        Args:
-            functional: DFT 泛函，默认 B3LYP
-            basis: 基组，默认 def2-SVP
-            verbose: 输出详细程度 (0-9)
-            max_memory: 最大内存使用 (MB)
-            scf_conv_tol: SCF 收敛阈值
-            geometry_optimization: 是否在 DFT 前进行几何优化
-            geo_opt_method: 几何优化方法 ("xtb", "pyscf", "none")
-            geo_opt_maxsteps: 几何优化最大步数
-        """
         self.functional = functional
         self.basis = basis
         self.verbose = verbose
@@ -140,27 +92,19 @@ class DFTCalculator:
         self.geo_opt_method = geo_opt_method
         self.geo_opt_maxsteps = geo_opt_maxsteps
         
-        # 配置日志
         logger.info(f"DFTCalculator initialized: {functional}/{basis}")
         logger.info(f"GPU available: {GPU_AVAILABLE}")
         logger.info(f"Geometry optimization: {geometry_optimization} ({geo_opt_method})")
         
-        # 检查几何优化可用性
         if geometry_optimization:
             if geo_opt_method == "xtb" and not XTB_AVAILABLE:
-                logger.warning("xtb-python not available, falling back to pyscf veloxchem")
-                self.geo_opt_method = "pyscf" if VELOCHEM_AVAILABLE else "none"
-            if geo_opt_method == "pyscf" and not VELOCHEM_AVAILABLE:
-                logger.warning("veloxchem not available, disabling geometry optimization")
-                self.geometry_optimization = False
-        
-        # 检查 GPU 基组兼容性
+                logger.warning("xtb-python not available, falling back to pyscf hybrid")
+                self.geo_opt_method = "pyscf"
+                
         if GPU_AVAILABLE:
             compatible, msg = check_basis_gpu_compatibility(basis)
             if not compatible:
                 logger.warning(msg)
-            else:
-                logger.debug(msg)
     
     def from_smiles(
         self,
@@ -170,53 +114,31 @@ class DFTCalculator:
         n_conformers: int = 1,
         random_seed: int = 42,
     ) -> gto.Mole:
-        """
-        从 SMILES 字符串生成分子对象
-        
-        Args:
-            smiles: SMILES 字符串
-            charge: 分子电荷
-            spin: 自旋多重度 (2S, 0 for singlet)
-            n_conformers: 构象数量
-            random_seed: 随机种子
-            
-        Returns:
-            PySCF Mole 对象
-        """
         if not RDKIT_AVAILABLE:
             raise ImportError("RDKit is required for SMILES processing")
         
         try:
-            # 解析 SMILES
             mol_rdkit = Chem.MolFromSmiles(smiles)
             if mol_rdkit is None:
                 raise ValueError(f"Invalid SMILES: {smiles}")
             
-            # 添加氢原子
             mol_rdkit = Chem.AddHs(mol_rdkit)
-            
-            # 生成 3D 构象
             AllChem.EmbedMolecule(mol_rdkit, randomSeed=random_seed)
             
-            # 力场优化
             try:
                 AllChem.MMFFOptimizeMolecule(mol_rdkit)
             except:
-                # 如果 MMFF 失败，尝试 UFF
                 AllChem.UFFOptimizeMolecule(mol_rdkit)
             
-            # 获取坐标
             conf = mol_rdkit.GetConformer()
             coords = conf.GetPositions()
             
-            # 构建原子列表
             atoms = []
             for i, atom in enumerate(mol_rdkit.GetAtoms()):
                 symbol = atom.GetSymbol()
                 x, y, z = coords[i]
                 atoms.append((symbol, (x, y, z)))
             
-            # 创建 PySCF Mole 对象
             mol = gto.Mole()
             mol.atom = atoms
             mol.basis = self.basis
@@ -224,12 +146,11 @@ class DFTCalculator:
             mol.spin = spin
             mol.verbose = self.verbose
             mol.max_memory = self.max_memory
+            # mol.cart = True  # <-- 【核心修改 1】：强制笛卡尔坐标
             mol.build()
             
             logger.info(f"Created Mole from SMILES: {smiles[:30]}...")
-            logger.info(f"  Atoms: {len(atoms)}, Charge: {charge}, Spin: {spin}")
             
-            # 如果启用了几何优化，在此执行
             if self.geometry_optimization:
                 mol = self.run_geometry_optimization(molecule_id="from_smiles", mol_obj=mol, charge=charge, spin=spin, uhf=(spin != 0))
             
@@ -237,6 +158,48 @@ class DFTCalculator:
             
         except Exception as e:
             logger.error(f"Failed to process SMILES '{smiles}': {e}")
+            raise
+            
+    def from_xyz(
+        self,
+        xyz_file: str,
+        charge: int = 0,
+        spin: int = 0,
+    ) -> gto.Mole:
+        try:
+            with open(xyz_file, 'r') as f:
+                lines = f.readlines()
+            
+            n_atoms = int(lines[0].strip())
+            
+            atoms = []
+            for i in range(2, 2 + n_atoms):
+                parts = lines[i].strip().split()
+                if len(parts) >= 4:
+                    symbol = parts[0]
+                    x, y, z = map(float, parts[1:4])
+                    atoms.append((symbol, (x, y, z)))
+            
+            mol = gto.Mole()
+            mol.atom = atoms
+            mol.basis = self.basis
+            mol.charge = charge
+            mol.spin = spin
+            mol.verbose = self.verbose
+            mol.max_memory = self.max_memory
+            mol.cart = True  # <-- 【核心修改 2】：强制笛卡尔坐标
+            mol.build()
+            
+            logger.info(f"Created Mole from XYZ: {xyz_file}")
+            
+            if self.geometry_optimization:
+                uhf = (spin != 0)
+                mol = self.run_geometry_optimization(molecule_id=xyz_file, mol_obj=mol, charge=charge, spin=spin, uhf=uhf)
+            
+            return mol
+            
+        except Exception as e:
+            logger.error(f"Failed to read XYZ file '{xyz_file}': {e}")
             raise
     
     def run_geometry_optimization(
@@ -247,23 +210,6 @@ class DFTCalculator:
         spin: int = 0,
         uhf: bool = False,
     ) -> gto.Mole:
-        """
-        执行几何优化
-        
-        qcGEM-Hybrid 策略：
-        1. 默认使用 xTB (GFN2-xTB) 进行快速几何优化（比 DFT 快 100-1000 倍）
-        2. 如果没有 xtb-python，回退到 PySCF + geometric（较慢但准确）
-        
-        Args:
-            molecule_id: 分子唯一标识
-            mol_obj: PySCF Mole 对象
-            charge: 分子电荷
-            spin: 自旋多重度
-            uhf: 是否使用 UHF（非闭壳层）
-            
-        Returns:
-            优化后的 PySCF Mole 对象
-        """
         if not self.geometry_optimization:
             return mol_obj
         
@@ -272,10 +218,9 @@ class DFTCalculator:
         
         try:
             if self.geo_opt_method == "xtb" and XTB_AVAILABLE:
-                # 使用 xTB 进行快速几何优化 (qcGEM-Hybrid 策略)
                 mol_opt = self._optimize_with_xtb(molecule_id, mol_obj, charge, spin, uhf)
-            elif self.geo_opt_method == "pyscf" and VELOCHEM_AVAILABLE:
-                # 使用 VeloxChem 进行 GPU 加速几何优化
+            elif self.geo_opt_method == "pyscf":
+                # 切换为 Hybrid 方法
                 mol_opt = self._optimize_with_pyscf(molecule_id, mol_obj, charge, spin)
             else:
                 logger.warning(f"[{molecule_id}] No geometry optimization method available, skipping")
@@ -297,22 +242,6 @@ class DFTCalculator:
         spin: int = 0,
         uhf: bool = False,
     ) -> gto.Mole:
-        """
-        使用 xTB (GFN2-xTB) + ASE 进行几何优化
-        
-        这是 qcGEM-Hybrid 策略的核心：xTB 优化速度比 DFT 快 100-1000 倍，
-        能为后续高精度 DFT 单点能提供合理的起始结构。
-        
-        Args:
-            molecule_id: 分子唯一标识
-            mol_obj: PySCF Mole 对象
-            charge: 分子电荷
-            spin: 自旋多重度
-            uhf: 是否使用 UHF
-            
-        Returns:
-            优化后的 PySCF Mole 对象
-        """
         from xtb.interface import Calculator, Param
         from xtb.libxtb import VERBOSITY_MINIMAL
         from ase import Atoms
@@ -320,14 +249,12 @@ class DFTCalculator:
         
         logger.info(f"[{molecule_id}] Using xTB (GFN2-xTB) + ASE for geometry optimization")
         
-        # 准备 ASE Atoms 对象
         symbols = [mol_obj.atom_symbol(i) for i in range(mol_obj.natm)]
         positions = mol_obj.atom_coords()
         atoms = Atoms(symbols=symbols, positions=positions)
         atoms.charge = charge
         atoms.spin = 1 if uhf else 0
         
-        # 定义 xTB 计算器类
         class XTBCalculator:
             def __init__(self, atoms):
                 self.atoms = atoms
@@ -342,7 +269,7 @@ class DFTCalculator:
                 if atoms is None:
                     atoms = self.atoms
                 numbers = atoms.get_atomic_numbers()
-                positions = atoms.get_positions() * 0.529177  # Angstrom to Bohr
+                positions = atoms.get_positions() * 0.529177 
                 calc = Calculator(Param.GFN2xTB, numbers, positions, 
                                 charge=getattr(atoms, 'charge', 0),
                                 uhf=getattr(atoms, 'spin', 0))
@@ -352,30 +279,25 @@ class DFTCalculator:
                 if name == 'energy':
                     return res.get_energy()
                 elif name == 'forces':
-                    # Convert Ha/Bohr to eV/Angstrom
                     return res.get_gradient() * 51.42208619083232
                     
             def calculation_required(self, atoms, quantities):
                 return True
         
-        # 设置计算器并执行优化
         atoms.calc = XTBCalculator(atoms)
         
         try:
-            opt = BFGS(atoms, logfile=None)  # 禁用 ASE 日志
+            opt = BFGS(atoms, logfile=None) 
             opt.run(fmax=0.05, steps=self.geo_opt_maxsteps)
             
-            # 获取优化后的坐标
             opt_coords = atoms.get_positions()
             
-            # 构建新的原子列表
             new_atoms = []
             for i in range(mol_obj.natm):
                 symbol = mol_obj.atom_symbol(i)
                 x, y, z = opt_coords[i]
                 new_atoms.append((symbol, (x, y, z)))
             
-            # 创建新的 Mole 对象
             mol_opt = gto.Mole()
             mol_opt.atom = new_atoms
             mol_opt.basis = mol_obj.basis
@@ -383,9 +305,9 @@ class DFTCalculator:
             mol_opt.spin = mol_obj.spin
             mol_opt.verbose = mol_obj.verbose
             mol_opt.max_memory = mol_obj.max_memory
+            mol_opt.cart = True # 保持笛卡尔
             mol_opt.build()
             
-            # 记录最终能量
             final_energy = atoms.get_potential_energy()
             logger.info(f"[{molecule_id}] xTB optimization converged, final energy: {final_energy:.6f} Hartree")
             
@@ -403,256 +325,100 @@ class DFTCalculator:
         spin: int = 0,
     ) -> gto.Mole:
         """
-        使用 VeloxChem + SciPy 进行几何优化 (深度 Debug 版)
+        【核心修改 3】：完全重写为 GPU-CPU 混合计算架构。
         """
-        import veloxchem as vlx
         from scipy.optimize import minimize
-        import traceback  # 引入 traceback 追踪真实报错行
+        from gpu4pyscf.dft import RKS as GPU_RKS
+        import numpy as np
         
-        logger.info(f"[{molecule_id}] 🚀 DEBUG MODE: VeloxChem Optimization Started")
+        logger.info(f"[{molecule_id}] 🚀 Switching to Hybrid Architecture: GPU SCF + CPU Gradient")
         
-        try:
-            # 1. 提取 PySCF 数据
-            symbols = [mol_obj.atom_symbol(i) for i in range(mol_obj.natm)]
-            init_coords_ang = mol_obj.atom_coords() * 0.52917721092
-            n_atoms = len(symbols)
+        # 二次确认笛卡尔坐标状态
+        if not getattr(mol_obj, 'cart', False):
+            mol_obj.cart = True
+            mol_obj.build()
+        
+        init_coords_bohr = mol_obj.atom_coords().flatten()
+        iteration = [0]
+        
+        def cost_function(coords_1d):
+            curr_coords = coords_1d.reshape(-1, 3)
+            mol_step = mol_obj.copy()
+            mol_step.set_geom_(curr_coords, unit='Bohr')
+            mol_step.build()
             
-            logger.info(f"[{molecule_id}] [DEBUG 1] PySCF atom count: {n_atoms}")
-            logger.info(f"[{molecule_id}] [DEBUG 2] Init coords shape: {init_coords_ang.shape}")
+            # GPU 计算能量
+            mf_gpu = GPU_RKS(mol_step).density_fit(auxbasis='def2-svp-jkfit')
+            mf_gpu.xc = self.functional
+            mf_gpu.conv_tol = self.scf_conv_tol
+            energy = mf_gpu.kernel()
             
-            # 2. 构造最最纯净的坐标字符串（绝对不要加原子数和注释！）
-            xyz_lines = []
-            for s, (x, y, z) in zip(symbols, init_coords_ang):
-                xyz_lines.append(f"{s:<2} {x:14.9f} {y:14.9f} {z:14.9f}")
-            xyz_content = "\n".join(xyz_lines)
+            mf_cpu = mf_gpu.to_cpu()
             
-            # 3. 构造 VeloxChem 对象
-            vlx_mol = vlx.Molecule.read_str(xyz_content)
+            # 直接调用原生梯度方法，不需要传参数，它会自动读取内部的波函数
+            grad_obj = mf_cpu.nuc_grad_method()
+            grad_3d = grad_obj.kernel()
             
-            # 3. 构造 VeloxChem 对象
-            vlx_mol = vlx.Molecule.read_str(xyz_content)
-            logger.info(f"[{molecule_id}] [DEBUG 3] VeloxChem parsed atoms: {vlx_mol.number_of_atoms()}")
+            grad_1d = np.asarray(grad_3d, dtype=float).flatten()
             
-            if charge != 0:
-                vlx_mol.set_charge(charge)
+            iteration[0] += 1
+            if iteration[0] % 1 == 0:
+                grad_norm = np.linalg.norm(grad_1d)
+                logger.debug(f"[{molecule_id}] Opt step {iteration[0]}: E = {energy:.8f}, |grad| = {grad_norm:.6f}")
             
-            basis_name = str(self.basis).lower()
-            basis = vlx.MolecularBasis.read(vlx_mol, basis_name)
-            
-            scf_drv = vlx.ScfRestrictedDriver()
-            scf_drv.xcfun = self.functional.lower()
-            scf_drv.conv_thresh = 1e-6
-            scf_drv.max_iter = 100
-            # --- 新增的 GPU 保护设置 ---
-            # 1. 降低积分网格级别（默认通常是 4，我们降到 3，大幅减少内存占用，精度影响极小）
-            scf_drv.grid_level = 3
-            # 2. 关闭一些可能导致 GPU 越界的并行猜测加速
-            scf_drv.reduced_basis_scf = False
-            grad_drv = vlx.GradientDriver()
-            
-            iteration = [0]
-            
-            # 4. 优化闭包函数
-            # 3. 闭包函数：改用“每步重新实例化”策略
-            def cost_function(coords_1d):
-                try:
-                    # 重新组装 XYZ 字符串
-                    curr_coords_ang = np.array(coords_1d, dtype=float).reshape(n_atoms, 3)
-                    
-                    # 重新生成这一个 step 的 XYZ
-                    step_xyz_lines = []
-                    for s, (x, y, z) in zip(symbols, curr_coords_ang):
-                        step_xyz_lines.append(f"{s} {x:.8f} {y:.8f} {z:.8f}")
-                    step_xyz_content = "\n".join(step_xyz_lines)
-                    
-                    # 每次迭代创建一个新的 molecule 对象！绕过 set_coordinates 报错
-                    step_mol = vlx.Molecule.read_str(step_xyz_content)
-                    if charge != 0:
-                        step_mol.set_charge(charge)
-                    
-                    # 重新读取 basis (因为分子换了)
-                    step_basis = vlx.MolecularBasis.read(step_mol, basis_name)
-                    
-                    # 计算能量
-                    scf_results = scf_drv.compute(step_mol, step_basis)
-                    energy = float(scf_results['energy'])
-                    
-                    # 计算梯度
-                    grad_results = grad_drv.compute(step_mol, step_basis, scf_results)
-                    raw_grad = grad_results['gradient']
-                    
-                    # 提取梯度
-                    clean_grad = np.zeros((n_atoms, 3), dtype=float)
-                    for i in range(n_atoms):
-                        clean_grad[i, 0] = float(raw_grad[i][0])
-                        clean_grad[i, 1] = float(raw_grad[i][1])
-                        clean_grad[i, 2] = float(raw_grad[i][2])
-                    
-                    grad_1d = clean_grad.flatten()
-                    
-                    iteration[0] += 1
-                    logger.debug(f"[{molecule_id}] Opt step {iteration[0]}: E = {energy:.8f}")
-                    
-                    return energy, grad_1d
-                    
-                except Exception as inner_e:
-                    logger.error(f"[{molecule_id}] [CRASH IN COST_FUNCTION] {inner_e}")
-                    logger.error(traceback.format_exc())
-                    raise
+            cupy.get_default_memory_pool().free_all_blocks()
+            return energy, grad_1d
 
-            # 5. 执行 SciPy 优化
-            x0 = np.array(init_coords_ang, dtype=float).flatten()
-            logger.info(f"[{molecule_id}] [DEBUG 6] SciPy x0 shape: {x0.shape}")
-            
-            res = minimize(
-                cost_function,
-                x0,
-                method='L-BFGS-B',
-                jac=True,
-                options={'maxiter': self.geo_opt_maxsteps, 'disp': False}
-            )
-            
-            # 6. 回写坐标
-            final_coords_ang = res.x.reshape(n_atoms, 3) 
-            atoms = []
-            for i, symbol in enumerate(symbols):
-                x, y, z = final_coords_ang[i]
-                atoms.append((symbol, (x, y, z)))
-            
-            mol_opt = gto.Mole()
-            mol_opt.atom = atoms
-            mol_opt.basis = mol_obj.basis
-            mol_opt.charge = mol_obj.charge
-            mol_opt.spin = mol_obj.spin
-            mol_opt.verbose = mol_obj.verbose
-            mol_opt.max_memory = mol_obj.max_memory
-            mol_opt.build()
-            
-            logger.info(f"[{molecule_id}] ✅ VeloxChem optimization completed!")
-            return mol_opt
-            
-        except ImportError as ie:
-            logger.error(f"[{molecule_id}] ❌ VeloxChem not available: {ie}")
-            raise
-            
-        except Exception as e:
-            # 打印最致命的 Traceback！
-            logger.error(f"[{molecule_id}] ❌ VeloxChem optimization failed: {e}")
-            logger.error(f"[{molecule_id}] === TRACEBACK START ===")
-            logger.error(traceback.format_exc())
-            logger.error(f"[{molecule_id}] === TRACEBACK END ===")
-            logger.warning(f"[{molecule_id}] 🔄 Consider using xTB method instead: geo_opt_method='xtb'")
-            raise
-    
-    def from_xyz(
-        self,
-        xyz_file: str,
-        charge: int = 0,
-        spin: int = 0,
-    ) -> gto.Mole:
-        """
-        从 XYZ 文件读取分子结构
+        logger.info(f"[{molecule_id}] Starting L-BFGS-B optimization (max_steps={self.geo_opt_maxsteps})...")
         
-        Args:
-            xyz_file: XYZ 文件路径
-            charge: 分子电荷
-            spin: 自旋多重度
-            
-        Returns:
-            PySCF Mole 对象
-        """
-        try:
-            # 读取 XYZ 文件
-            with open(xyz_file, 'r') as f:
-                lines = f.readlines()
-            
-            # 解析 XYZ
-            n_atoms = int(lines[0].strip())
-            comment = lines[1].strip() if len(lines) > 1 else ""
-            
-            atoms = []
-            for i in range(2, 2 + n_atoms):
-                parts = lines[i].strip().split()
-                if len(parts) >= 4:
-                    symbol = parts[0]
-                    x, y, z = map(float, parts[1:4])
-                    atoms.append((symbol, (x, y, z)))
-            
-            # 创建 Mole 对象
-            mol = gto.Mole()
-            mol.atom = atoms
-            mol.basis = self.basis
-            mol.charge = charge
-            mol.spin = spin
-            mol.verbose = self.verbose
-            mol.max_memory = self.max_memory
-            mol.build()
-            
-            logger.info(f"Created Mole from XYZ: {xyz_file}")
-            logger.info(f"  Atoms: {len(atoms)}, Charge: {charge}, Spin: {spin}")
-            
-            # 如果启用了几何优化，在此执行
-            if self.geometry_optimization:
-                uhf = (spin != 0)
-                mol = self.run_geometry_optimization(molecule_id=xyz_file, mol_obj=mol, charge=charge, spin=spin, uhf=uhf)
-            
-            return mol
-            
-        except Exception as e:
-            logger.error(f"Failed to read XYZ file '{xyz_file}': {e}")
-            raise
+        res = minimize(
+            cost_function,
+            init_coords_bohr,
+            method='L-BFGS-B',
+            jac=True,
+            options={'maxiter': self.geo_opt_maxsteps, 'ftol': 1e-6, 'gtol': 1e-4, 'disp': False}
+        )
+        
+        mol_opt = mol_obj.copy()
+        mol_opt.set_geom_(res.x.reshape(-1, 3), unit='Bohr')
+        mol_opt.build()
+        
+        logger.info(f"[{molecule_id}] ✅ Optimization finished. Steps: {res.nit}, Converged: {res.success}")
+        logger.info(f"[{molecule_id}]    Final energy: {res.fun:.8f} Hartree")
+        
+        return mol_opt
     
     def run_sp(
         self,
         molecule_id: str,
         mol_obj: gto.Mole,
     ):
-        """
-        执行单点能计算
-        
-        Args:
-            molecule_id: 分子唯一标识
-            mol_obj: PySCF Mole 对象
-            
-        Returns:
-            已收敛的 RKS 对象（CPU 端）
-        """
         logger.info(f"[{molecule_id}] Starting DFT calculation...")
         start_time = time.time()
         
-        # 检查 GPU 基组兼容性
-        if GPU_AVAILABLE:
-            compatible, msg = check_basis_gpu_compatibility(self.basis)
-            if not compatible:
-                logger.warning(f"[{molecule_id}] ⚠️ {msg}")
-                logger.warning(f"[{molecule_id}] ⚠️ GPU calculation will likely fail and fall back to CPU")
-                logger.warning(f"[{molecule_id}] ⚠️ For GPU acceleration, use: sto-3g, 3-21g, 6-31g (no d functions)")
+        # 二次确认确保 SP 阶段也是笛卡尔坐标
+        if not getattr(mol_obj, 'cart', False):
+            mol_obj.cart = True
+            mol_obj.build()
         
         try:
-            # 如果使用 GPU，尝试使用 gpu4pyscf
             if GPU_AVAILABLE:
                 logger.info(f"[{molecule_id}] Trying GPU acceleration...")
                 try:
-                    # 启用密度拟合 (RI-J) 以提高兼容性并加速
-                    mf = GPU_RKS(mol_obj).density_fit()
+                    mf = GPU_RKS(mol_obj).density_fit(auxbasis='def2-svp-jkfit')
                     mf.xc = self.functional
                     mf.conv_tol = self.scf_conv_tol
                     mf.max_cycle = 100
                     
-                    # 执行 SCF 计算
                     energy = mf.kernel()
                     
-                    # 检查收敛
                     if not mf.converged:
                         logger.warning(f"[{molecule_id}] SCF did not converge!")
-                        logger.info(f"[{molecule_id}] Trying second-order convergence...")
                         mf = mf.newton()
                         energy = mf.kernel()
                     
-                    # GPU 计算结果转回 CPU（用于后续特征提取）
                     if hasattr(mf, 'to_cpu'):
                         mf = mf.to_cpu()
-                        logger.debug(f"[{molecule_id}] Moved back to CPU")
                     
                     elapsed = time.time() - start_time
                     logger.info(f"[{molecule_id}] GPU DFT completed in {elapsed:.2f}s")
@@ -660,46 +426,34 @@ class DFTCalculator:
                     return mf
                     
                 except Exception as gpu_error:
-                    # GPU 计算失败，回退到 CPU
+                    import traceback
                     logger.error(f"[{molecule_id}] ❌ GPU calculation failed!")
-                    logger.error(f"[{molecule_id}] Error: {gpu_error}")
+                    logger.error(f"[{molecule_id}] === TRACEBACK START ===")
+                    logger.error(traceback.format_exc())
+                    logger.error(f"[{molecule_id}] === TRACEBACK END ===")
                     logger.warning(f"[{molecule_id}] ⚠️ Falling back to CPU mode")
-                    logger.warning(f"[{molecule_id}] ⚠️ This is likely due to:")
-                    logger.warning(f"[{molecule_id}]    1. Basis set contains d/f functions (e.g., def2-SVP)")
-                    logger.warning(f"[{molecule_id}]    2. Out of GPU memory")
-                    logger.warning(f"[{molecule_id}] ⚠️ Solutions:")
-                    logger.warning(f"[{molecule_id}]    - Use GPU-friendly basis: --basis 3-21g or --basis 6-31g")
-                    logger.warning(f"[{molecule_id}]    - Reduce --n-producers to save GPU memory")
-                    logger.info(f"[{molecule_id}] Switching to CPU calculation...")
             
-            # CPU 计算（回退或原始 CPU 模式）
-            # 对大分子使用密度拟合加速
-            if mol_obj.natm > 6:  # 6原子以上启用密度拟合
+            if mol_obj.natm > 6: 
                 logger.info(f"[{molecule_id}] Using density fitting for CPU calculation")
                 mf = dft.RKS(mol_obj).density_fit()
             else:
                 mf = dft.RKS(mol_obj)
             mf.xc = self.functional
-            # 添加 D3BJ 色散校正（Grimme D3 with Becke-Johnson damping）
             try:
                 mf.disp = 'd3bj'
-                logger.info(f"[{molecule_id}] D3BJ dispersion correction enabled")
-            except Exception as disp_error:
-                logger.warning(f"[{molecule_id}] Failed to enable D3BJ: {disp_error}")
+            except Exception:
+                pass
             mf.conv_tol = self.scf_conv_tol
             mf.max_cycle = 100
             
             energy = mf.kernel()
             
             if not mf.converged:
-                logger.warning(f"[{molecule_id}] SCF did not converge!")
-                logger.info(f"[{molecule_id}] Trying second-order convergence...")
                 mf = mf.newton()
                 energy = mf.kernel()
             
             elapsed = time.time() - start_time
             logger.info(f"[{molecule_id}] CPU DFT completed in {elapsed:.2f}s")
-            logger.info(f"[{molecule_id}] Energy: {energy:.6f} Hartree")
             
             return mf
             
@@ -713,26 +467,12 @@ class DFTCalculator:
         molecule_id: str,
         output_dir: str = "temp/",
     ) -> str:
-        """
-        导出波函数到 pickle 文件
-        
-        Args:
-            mf: 已收敛的 RKS 对象（CPU 端）
-            molecule_id: 分子唯一标识
-            output_dir: 输出目录
-            
-        Returns:
-            导出的文件路径
-        """
         try:
-            # 确保输出目录存在
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             
-            # 生成文件名
             pkl_file = output_path / f"{molecule_id}.pkl"
             
-            # 导出为 pickle（只保存需要的属性）
             data = {
                 'mol': mf.mol,
                 'mo_energy': mf.mo_energy,
@@ -743,8 +483,6 @@ class DFTCalculator:
             }
             with open(pkl_file, 'wb') as f:
                 pickle.dump(data, f)
-            
-            logger.info(f"[{molecule_id}] Wavefunction exported to {pkl_file}")
             
             return str(pkl_file)
             
@@ -758,36 +496,23 @@ class DFTCalculator:
         mol_obj: gto.Mole,
         output_dir: str = "temp/",
     ) -> dict:
-        """
-        执行完整流程：计算 + 导出
-        
-        Args:
-            molecule_id: 分子唯一标识
-            mol_obj: PySCF Mole 对象
-            output_dir: 输出目录
-            
-        Returns:
-            包含计算结果的字典
-        """
         result = {
             "molecule_id": molecule_id,
             "success": False,
             "energy": None,
             "pkl_file": None,
-            "pkl_path": None,  # 别名，保持兼容性
+            "pkl_path": None,
             "error": None,
         }
         
         try:
-            # 执行 DFT 计算
             mf = self.run_sp(molecule_id, mol_obj)
             result["energy"] = mf.e_tot
             result["converged"] = mf.converged
             
-            # 导出波函数
             pkl_path = self.export_wavefunction(mf, molecule_id, output_dir)
             result["pkl_file"] = pkl_path
-            result["pkl_path"] = pkl_path  # 别名，保持兼容性
+            result["pkl_path"] = pkl_path
             result["success"] = True
             
         except Exception as e:
