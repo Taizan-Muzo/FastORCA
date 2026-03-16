@@ -173,17 +173,23 @@ class RealspaceFeatureExtractor:
         
         # 获取结果
         try:
-            status, data = queue.get_nowait()
+            status, data = queue.get(timeout=5)  # 给5秒缓冲时间
             if status == 'success':
                 return data
             else:
-                result["metadata"]["extraction_status"] = "failed"
-                result["metadata"]["failure_reason"] = f"subprocess_error: {data}"
-                return result
-        except:
-            result["metadata"]["extraction_status"] = "failed"
-            result["metadata"]["failure_reason"] = "subprocess_communication_failed"
-            return result
+                logger.error(f"[{molecule_id}] Subprocess error: {data}")
+                # M5.5: 子进程失败时回退到直接执行
+                logger.warning(f"[{molecule_id}] Falling back to direct execution (no timeout)")
+                return self._extract_cubes(mol, mf, molecule_id, output_dir, 
+                                          self._init_realspace_features_skeleton(), 
+                                          time.time())
+        except Exception as e:
+            logger.error(f"[{molecule_id}] Queue communication error: {e}")
+            # 回退到直接执行
+            logger.warning(f"[{molecule_id}] Falling back to direct execution (no timeout)")
+            return self._extract_cubes(mol, mf, molecule_id, output_dir,
+                                      self._init_realspace_features_skeleton(),
+                                      time.time())
     
     def _extract_cubes(
         self,
