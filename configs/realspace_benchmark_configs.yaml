@@ -1,0 +1,85 @@
+# M5.5 Realspace Benchmark Configurations
+# 用于测试不同参数组合的性能和成功率
+
+# P0: 最保守生产档（用户指定）
+production_ultra_conservative:
+  name: "P0 - Ultra Conservative"
+  description: "最保守的生产配置，追求最高成功率和最短耗时"
+  timeout_seconds: 30
+  max_atoms: 25
+  max_total_grid_points: 500000
+  grid_resolution_angstrom: 0.3
+  margin_angstrom: 3.0
+  target: 
+    success_rate: ">=95%"
+    mean_time: "<30s"
+
+# P1: 保守生产档
+production_conservative:
+  name: "P1 - Conservative"
+  description: "保守的生产配置，平衡成功率和耗时"
+  timeout_seconds: 60
+  max_atoms: 30
+  max_total_grid_points: 750000
+  grid_resolution_angstrom: 0.3
+  margin_angstrom: 3.0
+  target:
+    success_rate: ">=90%"
+    mean_time: "<45s"
+
+# P2: 中等保守
+production_balanced:
+  name: "P2 - Balanced"
+  description: "平衡配置，适合一般生产使用"
+  timeout_seconds: 90
+  max_atoms: 40
+  max_total_grid_points: 1000000
+  grid_resolution_angstrom: 0.25
+  margin_angstrom: 3.5
+  target:
+    success_rate: ">=85%"
+    mean_time: "<60s"
+
+# P3: 当前默认值
+standard_default:
+  name: "P3 - Current Default"
+  description: "当前系统默认配置"
+  timeout_seconds: 120
+  max_atoms: 50
+  max_total_grid_points: 1000000
+  grid_resolution_angstrom: 0.2
+  margin_angstrom: 4.0
+  target:
+    success_rate: ">=80%"
+    mean_time: "<90s"
+
+# P4: 宽松研究档
+research_relaxed:
+  name: "P4 - Relaxed Research"
+  description: "宽松的研究配置，追求更高质量数据"
+  timeout_seconds: 180
+  max_atoms: 60
+  max_total_grid_points: 1500000
+  grid_resolution_angstrom: 0.2
+  margin_angstrom: 4.0
+  target:
+    success_rate: ">=90%"
+    mean_time: "<120s"
+
+# P5: 高质量研究档
+research_high_quality:
+  name: "P5 - High Quality Research"
+  description: "高质量研究配置，最详细的cube数据"
+  timeout_seconds: 300
+  max_atoms: 80
+  max_total_grid_points: 2000000
+  grid_resolution_angstrom: 0.15
+  margin_angstrom: 5.0
+  target:
+    success_rate: ">=95%"
+    mean_time: "<180s"
+
+# 推荐配置（将在benchmark后更新）
+recommended:
+  production_full_default: production_balanced  # 默认推荐P2
+  research_full_default: research_relaxed       # 研究推荐P4

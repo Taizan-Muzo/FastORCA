@@ -7,6 +7,7 @@ import os
 import json
 import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import time
@@ -21,6 +22,13 @@ from pyscf.lo import orth
 from pyscf import lib
 import pickle
 from rdkit import Chem
+
+# Import unified output schema (Milestone 1)
+from utils.output_schema import UnifiedOutputBuilder
+from analysis.orbital_features import extract_orbital_features
+from analysis.realspace_features import extract_realspace_features
+from analysis.external.adapters.critic2_adapter import run_critic2_analysis, Critic2Adapter
+from analysis.external.bridge_context import BridgeContext
 
 # Optional: HDF5 support
 try:
@@ -158,9 +166,11 @@ class FeatureExtractor:
                 data = pickle.load(f)
             
             mol = data['mol']
+            mol.verbose = 0  # M5: 静音
             
             # 重建 mf 对象
             mf = dft.RKS(mol)
+            mf.verbose = 0  # M5: 静音
             mf.mo_energy = data['mo_energy']
             mf.mo_coeff = data['mo_coeff']
             mf.mo_occ = data['mo_occ']
@@ -1009,3 +1019,844 @@ class FeatureExtractor:
                 group.attrs[key] = value
             else:
                 group.attrs[key] = str(value)
+
+    # ============ Milestone 1: Unified Schema 接口 ============
+
+    def extract_unified(
+        self,
+        pkl_path: str,
+        molecule_id: str,
+        smiles: str = None,
+        save_fock_matrix: bool = False,
+        dft_config: Dict[str, Any] = None,
+        plugin_plan: Dict[str, Any] = None,
+        run_mode: str = "full",
+        output_dir: str = None,
+    ) -> Dict[str, Any]:
+        """
+        使用统一 Schema 提取特征（Milestone 1 新接口）
+        
+        不改原有 extract_all_features()，新增此方法作为统一出口。
+        
+        Args:
+            pkl_path: pickle 文件路径
+            molecule_id: 分子标识
+            smiles: 原始 SMILES 字符串
+            save_fock_matrix: 是否保存 Fock 矩阵
+            dft_config: DFT 配置信息（用于 provenance）
+            plugin_plan: 插件执行计划（由 PluginRegistry 生成）
+            run_mode: 运行模式 ("fast" 或 "full")
+            output_dir: 输出目录（用于保存 cube 文件等）
+            
+        Returns:
+            符合统一 Schema 的字典
+        """
+        import time
+        from loguru import logger
+        
+        start_time = time.time()
+        
+        # 创建 unified builder
+        builder = UnifiedOutputBuilder(molecule_id, smiles or "")
+        
+        # 设置 provenance 中的 DFT 配置
+        if dft_config:
+            builder.set_provenance(
+                dft_functional=dft_config.get("functional"),
+                basis_set=dft_config.get("basis"),
+                geometry_optimization_method=dft_config.get("geo_opt_method"),
+                gpu_acceleration_used=dft_config.get("gpu_used"),
+            )
+        
+        # 检查插件可用性
+        try:
+            from rdkit import Chem
+            builder.set_plugin_status("rdkit", available=True)
+        except ImportError:
+            builder.set_plugin_status("rdkit", available=False)
+        
+        try:
+            from xtb.interface import Calculator
+            builder.set_plugin_status("xtb", available=True)
+        except ImportError:
+            builder.set_plugin_status("xtb", available=False)
+        
+        builder.set_plugin_status("pyscf", available=True)  # PySCF 是必须依赖
+        
+        # ============ 步骤 1: RDKit 解析 ============
+        mol_rdkit = None
+        if smiles:
+            builder.set_plugin_status("rdkit", used=True)
+            try:
+                from rdkit import Chem
+                mol_rdkit = Chem.MolFromSmiles(smiles)
+                if mol_rdkit is not None:
+                    mol_rdkit = Chem.AddHs(mol_rdkit)
+                    builder.set_status(rdkit_parse_success=True)
+                    builder.set_plugin_status("rdkit", success=True)
+                    
+                    # 提取 RDKit 全局特征
+                    rdkit_global = self.extract_rdkit_global_features(mol_rdkit)
+                    builder.set_global_rdkit(
+                        molecular_weight=rdkit_global.get("Molecular Weight"),
+                        logp=rdkit_global.get("LogP"),
+                        tpsa=rdkit_global.get("TPSA"),
+                        h_bond_donors=rdkit_global.get("H Bond Donor"),
+                        h_bond_acceptors=rdkit_global.get("H Bond Acceptor"),
+                        rotatable_bonds=rdkit_global.get("Rotatable Bonds"),
+                        heavy_atom_count=rdkit_global.get("Heavy Atom Count")
+                    )
+                    
+                    # 提取分子式
+                    from rdkit.Chem import rdMolDescriptors
+                    formula = rdMolDescriptors.CalcMolFormula(mol_rdkit)
+                    builder.set_molecule_info(formula=formula)
+                    
+                else:
+                    builder.set_status(rdkit_parse_success=False, invalid_input=True)
+                    builder.add_error(f"RDKit failed to parse SMILES: '{smiles}'")
+                    builder.set_plugin_status("rdkit", success=False, errors=["Failed to parse SMILES"])
+                    return builder.build()
+            except Exception as e:
+                builder.set_status(rdkit_parse_success=False)
+                builder.add_error(f"RDKit error: {e}")
+                builder.set_plugin_status("rdkit", success=False, errors=[str(e)])
+        
+        # ============ 步骤 2: 加载波函数 ============
+        mol = None
+        mf = None
+        builder.set_artifacts_wavefunction(pkl_path=pkl_path)
+        
+        try:
+            mol, mf = self.load_wavefunction(pkl_path)
+            builder.set_status(wavefunction_load_success=True)
+            builder.set_artifacts_wavefunction(loaded_successfully=True)
+            builder.set_plugin_status("pyscf", used=True, success=True)
+            
+            # 设置分子基本信息
+            builder.set_molecule_info(
+                natm=mol.natm,
+                charge=mol.charge,
+                spin=mol.spin,  # N_alpha - N_beta
+                multiplicity=mol.spin + 1  # 2S + 1
+            )
+            
+            # 设置几何信息
+            builder.set_geometry(
+                atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
+                atom_coords_angstrom=mol.atom_coords(unit='A').tolist(),
+                point_group=self._detect_point_group(mol)
+            )
+            
+            # 设置 SCF 状态和几何优化状态（从 dft_config 显式设置）
+            scf_converged = getattr(mf, 'converged', False)
+            geo_opt_success = dft_config.get("geometry_optimization", True) if dft_config else True
+            # 如果几何优化被禁用，视为成功；如果启用，假设成功（失败会在更早阶段捕获）
+            builder.set_status(
+                scf_convergence_success=scf_converged,
+                geometry_optimization_success=geo_opt_success
+            )
+            builder.set_global_dft(scf_converged=scf_converged)
+            
+            if not scf_converged:
+                builder.add_error("SCF did not converge")
+                builder.set_plugin_status("pyscf", success=False, errors=["SCF not converged"])
+            
+        except Exception as e:
+            builder.set_status(wavefunction_load_success=False)
+            builder.set_artifacts_wavefunction(loaded_successfully=False)
+            builder.add_error(f"Failed to load wavefunction: {e}")
+            builder.set_plugin_status("pyscf", used=True, success=False, errors=[str(e)])
+            return builder.build()
+        
+        # ============ 步骤 3: 提取全局 DFT 特征 ============
+        if mol is not None and mf is not None:
+            try:
+                global_features = self.extract_global_features(mol, mf)
+                builder.set_global_dft(
+                    total_energy_hartree=global_features.get("total_energy"),
+                    homo_energy_hartree=global_features.get("homo_energy"),
+                    lumo_energy_hartree=global_features.get("lumo_energy"),
+                    homo_lumo_gap_hartree=global_features.get("homo_lumo_gap"),
+                    dipole_moment_debye=global_features.get("dipole_moment"),
+                    dipole_vector_debye=global_features.get("dipole_vector"),
+                    dispersion_correction=getattr(mf, 'disp', None) is not None
+                )
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] Global features extraction failed: {e}")
+                builder.add_error(f"Global features failed: {e}")
+        
+        # ============ 步骤 4: 提取 RDKit 原子特征 ============
+        # RDKit 与 PySCF 原子索引对齐保护
+        rdkit_pyscf_aligned = False
+        if mol_rdkit is not None and mol is not None:
+            try:
+                # 检查1: 原子数量匹配
+                if mol_rdkit.GetNumAtoms() != mol.natm:
+                    logger.warning(
+                        f"[{molecule_id}] RDKit/PySCF atom count mismatch: "
+                        f"RDKit={mol_rdkit.GetNumAtoms()}, PySCF={mol.natm}. "
+                        f"Skipping RDKit atom/bond mapping."
+                    )
+                else:
+                    # 检查2: 原子序数匹配（逐原子验证）
+                    rdkit_atoms = list(mol_rdkit.GetAtoms())
+                    atomic_nums_match = True
+                    mismatched_atoms = []
+                    
+                    for i, (rdkit_atom, pyscf_symbol) in enumerate(zip(rdkit_atoms, 
+                                                                        [mol.atom_symbol(j) for j in range(mol.natm)])):
+                        rdkit_z = rdkit_atom.GetAtomicNum()
+                        # PySCF 元素符号转原子序数
+                        pyscf_z = self._symbol_to_atomic_num(pyscf_symbol)
+                        if rdkit_z != pyscf_z:
+                            atomic_nums_match = False
+                            mismatched_atoms.append(f"{i}(R:{rdkit_z}!=P:{pyscf_z})")
+                            if len(mismatched_atoms) >= 3:  # 最多显示3个
+                                break
+                    
+                    if atomic_nums_match:
+                        atom_features = self.extract_rdkit_atom_features(mol_rdkit)
+                        builder.set_atom_features(
+                            atomic_number=[a["Atomic Number"] for a in atom_features],
+                            rdkit_degree=[a["Degree"] for a in atom_features],
+                            rdkit_hybridization=[a["Hybridization Type"] for a in atom_features],
+                            rdkit_aromatic=[a["Aromatic"] for a in atom_features]
+                        )
+                        rdkit_pyscf_aligned = True
+                        logger.debug(f"[{molecule_id}] RDKit/PySCF atomic index alignment verified")
+                    else:
+                        logger.warning(
+                            f"[{molecule_id}] RDKit/PySCF atomic number mismatch at atoms: "
+                            f"{', '.join(mismatched_atoms)}. Skipping RDKit atom/bond mapping."
+                        )
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] RDKit atom features failed: {e}")
+        
+        # ============ 步骤 5: 提取波函数原子特征（电荷） ============
+        if mol is not None and mf is not None:
+            try:
+                mulliken = self.extract_mulliken_charges(mol, mf).tolist()
+                builder.set_atom_features(charge_mulliken=mulliken)
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] Mulliken charges failed: {e}")
+            
+            try:
+                hirshfeld = self.extract_hirshfeld_charges(mol, mf).tolist()
+                builder.set_atom_features(charge_hirshfeld=hirshfeld)
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] Hirshfeld charges failed: {e}")
+            
+            try:
+                iao = self.extract_iao_charges(mol, mf).tolist()
+                builder.set_atom_features(charge_iao=iao)
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] IAO charges failed: {e}")
+        
+        # ============ 步骤 6: 提取键特征 ============
+        # 初始化空键数组（空分子也使用 [] 而不是 None）
+        bond_indices: List[List[int]] = []
+        bond_types: List[Optional[str]] = []
+        mayer_values: List[float] = []
+        wiberg_values: List[float] = []
+        
+        # 只有在 RDKit/PySCF 原子索引对齐时才使用 RDKit 键拓扑
+        if mol_rdkit is not None and rdkit_pyscf_aligned:
+            try:
+                for bond in mol_rdkit.GetBonds():
+                    i = bond.GetBeginAtomIdx()
+                    j = bond.GetEndAtomIdx()
+                    # 验证索引有效性
+                    if 0 <= i < mol.natm and 0 <= j < mol.natm:
+                        bond_indices.append([i, j])
+                        bond_types.append(str(bond.GetBondType()))
+                    else:
+                        logger.warning(f"[{molecule_id}] RDKit bond index out of range: {i}-{j}")
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] RDKit bond extraction failed: {e}")
+        
+        if mol is not None and mf is not None:
+            try:
+                mayer_matrix = self.extract_mayer_bond_orders(mol, mf)
+                wiberg_matrix = self.extract_wiberg_bond_orders(mol, mf)
+                
+                # 如果有 RDKit 键拓扑（原子已对齐），按拓扑提取键级
+                if bond_indices:
+                    for i, j in bond_indices:
+                        mayer_values.append(float(mayer_matrix[i, j]))
+                        wiberg_values.append(float(wiberg_matrix[i, j]))
+                else:
+                    # 无 RDKit 拓扑时，使用阈值检测键
+                    threshold = 0.3
+                    for i in range(mol.natm):
+                        for j in range(i+1, mol.natm):
+                            if mayer_matrix[i, j] > threshold:
+                                bond_indices.append([i, j])
+                                bond_types.append(None)  # 无 RDKit 类型信息
+                                mayer_values.append(float(mayer_matrix[i, j]))
+                                wiberg_values.append(float(wiberg_matrix[i, j]))
+                
+                # 统一使用空数组 [] 而不是 None（即使是空分子）
+                builder.set_bond_features(
+                    bond_indices=bond_indices,
+                    bond_types_rdkit=bond_types if bond_types else [],  # 空键用 []
+                    bond_orders_mayer=mayer_values if mayer_values else [],
+                    bond_orders_wiberg=wiberg_values if wiberg_values else []
+                )
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] Bond order extraction failed: {e}")
+                # 失败时仍设置空数组
+                builder.set_bond_features(
+                    bond_indices=[],
+                    bond_types_rdkit=[],
+                    bond_orders_mayer=[],
+                    bond_orders_wiberg=[]
+                )
+        
+        # ============ 步骤 7: 提取 ELF 特征（扩展特征） ============
+        elf_bond_midpoints: List[float] = []  # 默认空数组
+        elf_alignment_stats = {
+            "raw_count": 0,
+            "aligned_count": 0,
+            "dropped_count": 0,
+        }
+        
+        if mol is not None and mf is not None:
+            try:
+                elf = self.extract_elf_features(mol, mf)
+                builder.set_atom_features(elf_value=elf.get("elf_at_atoms"))
+                
+                # M5.5: 对齐 ELF bond midpoints 到 bond_indices
+                elf_bond_midpoints, elf_alignment_stats = self._align_elf_to_bond_indices(
+                    elf.get("elf_bond_midpoints", []),
+                    elf.get("bond_pairs", []),
+                    bond_indices,
+                    molecule_id
+                )
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] ELF extraction failed: {e}")
+                elf_bond_midpoints = []
+        
+        builder.set_bond_features(elf_bond_midpoint=elf_bond_midpoints)
+        # 记录对齐统计到 metadata
+        builder.data["_elf_alignment_stats"] = elf_alignment_stats
+        
+        # ============ 步骤 8: 提取 CM5 电荷（扩展特征） ============
+        if mol is not None and mf is not None:
+            try:
+                cm5 = self.extract_cm5_charges(mol, mf).tolist()
+                builder.set_atom_features(charge_cm5=cm5)
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] CM5 charges failed: {e}")
+        
+        # ============ 步骤 9: 提取 Fock 矩阵（可选） ============
+        if save_fock_matrix and mol is not None and mf is not None:
+            try:
+                iao_matrix = self.extract_iao_matrix(mol, mf)
+                builder.set_artifacts_fock(
+                    iao_matrix=iao_matrix.get("iao_fock"),
+                    atomic_slices=iao_matrix.get("atomic_slices"),
+                    available=iao_matrix.get("iao_fock") is not None
+                )
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] Fock matrix extraction failed: {e}")
+        
+        # ============ 步骤 10: 提取局域轨道特征（Milestone 2） ============
+        # 检查 plugin_plan
+        should_run_orbital = True
+        orbital_skip_reason = None
+        if plugin_plan and "orbital_features" in plugin_plan:
+            plan = plugin_plan["orbital_features"]
+            should_run_orbital = plan.get("should_execute", True)
+            orbital_skip_reason = plan.get("skip_reason")
+        
+        if should_run_orbital and mol is not None and mf is not None:
+            try:
+                logger.info(f"[{molecule_id}] Extracting orbital features (IBO)...")
+                orbital_features = extract_orbital_features(mol, mf)
+                
+                # 将结果填入 builder
+                builder.set_orbital_features(
+                    local_orbital_method=orbital_features.get("local_orbital_method"),
+                    ibo_count=orbital_features.get("ibo_count"),
+                    ibo_occupancies=orbital_features.get("ibo_occupancies"),
+                    ibo_centers_angstrom=orbital_features.get("ibo_centers_angstrom"),
+                    ibo_atom_contributions=orbital_features.get("ibo_atom_contributions"),
+                    ibo_class_heuristic=orbital_features.get("ibo_class_heuristic"),
+                    orbital_locality_score=orbital_features.get("orbital_locality_score"),
+                    iao_atom_mapping=orbital_features.get("iao_atom_mapping"),
+                )
+                
+                # 设置 metadata
+                metadata = orbital_features.get("metadata", {})
+                builder.set_orbital_metadata(**metadata)
+                
+                status = metadata.get("extraction_status", "unknown")
+                if status == "success":
+                    logger.success(f"[{molecule_id}] Orbital features extracted: {orbital_features.get('ibo_count')} IBOs")
+                else:
+                    reason = metadata.get("failure_reason", "unknown")
+                    logger.warning(f"[{molecule_id}] Orbital features soft-fail: {reason}")
+                    
+            except Exception as e:
+                logger.error(f"[{molecule_id}] Orbital features extraction error: {e}")
+                logger.debug(f"[{molecule_id}] Orbital features traceback: {traceback.format_exc()}")
+                builder.set_orbital_metadata(
+                    extraction_status="failed",
+                    failure_reason="plugin_execution_error",
+                    exception_detail=str(e)  # 保留原始异常在 metadata 中
+                )
+        elif orbital_skip_reason:
+            # 策略性跳过
+            logger.info(f"[{molecule_id}] Skipping orbital features: {orbital_skip_reason}")
+            builder.set_orbital_metadata(
+                extraction_status="skipped",
+                failure_reason=orbital_skip_reason
+            )
+        
+        # ============ 步骤 11: 提取实空间特征（Milestone 3） ============
+        # 检查 plugin_plan
+        should_run_realspace = True
+        realspace_skip_reason = None
+        if plugin_plan and "realspace_features" in plugin_plan:
+            plan = plugin_plan["realspace_features"]
+            should_run_realspace = plan.get("should_execute", True)
+            realspace_skip_reason = plan.get("skip_reason")
+        
+        if should_run_realspace and mol is not None and mf is not None:
+            try:
+                logger.info(f"[{molecule_id}] Extracting realspace features...")
+                
+                # 创建 cube 输出目录
+                cube_output_dir = str(Path(output_dir) / "cubes") if output_dir else "./cubes"
+                
+                # M5: 获取 timeout 配置
+                timeout_seconds = None
+                if plugin_plan and "realspace_features" in plugin_plan:
+                    timeout_seconds = plugin_plan["realspace_features"].get("effective_timeout")
+                
+                realspace_result = extract_realspace_features(
+                    mol, mf,
+                    molecule_id=molecule_id,
+                    output_dir=cube_output_dir,
+                    timeout_seconds=timeout_seconds
+                )
+                
+                # 填入 realspace_features
+                builder.set_realspace_features(
+                    density_isosurface_volume=realspace_result.get("density_isosurface_volume"),
+                    density_isosurface_area=realspace_result.get("density_isosurface_area"),
+                    density_sphericity_like=realspace_result.get("density_sphericity_like"),
+                    esp_extrema_summary=realspace_result.get("esp_extrema_summary"),
+                    orbital_extent_homo=realspace_result.get("orbital_extent_homo"),
+                    orbital_extent_lumo=realspace_result.get("orbital_extent_lumo"),
+                )
+                
+                # 填入 cube_files 到 artifacts
+                cube_files = realspace_result.get("artifacts", {}).get("cube_files", {})
+                for cube_type, info in cube_files.items():
+                    if info:
+                        builder.set_cube_file(cube_type, info)
+                
+                # 设置 metadata
+                metadata = realspace_result.get("metadata", {})
+                builder.set_realspace_metadata(**metadata)
+                
+                status = metadata.get("extraction_status", "unknown")
+                if status == "success":
+                    logger.success(f"[{molecule_id}] Realspace features extracted")
+                elif status == "skipped":
+                    reason = metadata.get("failure_reason", "unknown")
+                    logger.warning(f"[{molecule_id}] Realspace features skipped: {reason}")
+                else:
+                    reason = metadata.get("failure_reason", "unknown")
+                    logger.warning(f"[{molecule_id}] Realspace features soft-fail: {reason}")
+                    
+            except Exception as e:
+                logger.error(f"[{molecule_id}] Realspace features extraction error: {e}")
+                logger.debug(f"[{molecule_id}] Realspace features traceback: {traceback.format_exc()}")
+                # M5: 使用正式的 reason code，原始异常保留在 debug log 中
+                error_msg = str(e)
+                if "unexpected keyword argument" in error_msg:
+                    failure_reason = "plugin_api_mismatch"
+                elif "subprocess" in error_msg.lower():
+                    failure_reason = "plugin_subprocess_error"
+                else:
+                    failure_reason = "plugin_execution_error"
+                
+                builder.set_realspace_metadata(
+                    extraction_status="failed",
+                    failure_reason=failure_reason,
+                    exception_detail=error_msg
+                )
+        elif realspace_skip_reason:
+            # 策略性跳过
+            logger.info(f"[{molecule_id}] Skipping realspace features: {realspace_skip_reason}")
+            builder.set_realspace_metadata(
+                extraction_status="skipped",
+                failure_reason=realspace_skip_reason
+            )
+        
+        # ============ 步骤 12: External Bridge - Critic2 (Milestone 4) ============
+        # 检查 plugin_plan
+        should_run_critic2 = False  # 默认关闭
+        critic2_skip_reason = None
+        if plugin_plan and "critic2_bridge" in plugin_plan:
+            plan = plugin_plan["critic2_bridge"]
+            should_run_critic2 = plan.get("should_execute", False)
+            critic2_skip_reason = plan.get("skip_reason")
+        
+        if should_run_critic2 and mol is not None and mf is not None:
+            try:
+                # 检查是否有 density cube
+                cube_files = builder.data.get("artifacts", {}).get("cube_files", {})
+                density_cube = cube_files.get("density", {}).get("path")
+                
+                if density_cube and Path(density_cube).exists():
+                    logger.info(f"[{molecule_id}] Running critic2 analysis...")
+                    
+                    # 创建 BridgeContext
+                    bridge_context = BridgeContext(
+                        molecule_id=molecule_id,
+                        atom_symbols=builder.data["geometry"]["atom_symbols"] or [mol.atom_symbol(i) for i in range(mol.natm)],
+                        atom_coords_angstrom=mol.atom_coords(unit='A').tolist(),
+                        natm=mol.natm,
+                        charge=mol.charge,
+                        spin=mol.spin,
+                        multiplicity=mol.spin + 1,
+                        density_cube_path=density_cube,
+                        geometry_coordinate_unit="angstrom",
+                        cube_native_unit="bohr",
+                        cube_output_unit="angstrom",
+                    )
+                    
+                    # 运行 critic2
+                    critic2_result = run_critic2_analysis(bridge_context)
+                    
+                    # 填入 external_bridge
+                    builder.set_external_bridge(
+                        "critic2",
+                        execution_status=critic2_result.execution_status,
+                        failure_reason=critic2_result.failure_reason,
+                        input_file=critic2_result.bridge_input_file,
+                        output_file=critic2_result.bridge_output_file,
+                        execution_time_seconds=critic2_result.bridge_execution_time_seconds,
+                        critic2_version=critic2_result.bridge_tool_version,
+                    )
+                    
+                    # 填入 external_features
+                    if critic2_result.success:
+                        features = critic2_result.features
+                        if "qtaim" in features:
+                            builder.set_external_features("critic2", features)
+                            logger.success(f"[{molecule_id}] Critic2 analysis completed: {features['qtaim'].get('n_bader_volumes', 0)} Bader volumes")
+                    else:
+                        logger.warning(f"[{molecule_id}] Critic2 soft-fail: {critic2_result.failure_reason}")
+                else:
+                    logger.warning(f"[{molecule_id}] Skipping critic2: no density cube available")
+                    builder.set_external_bridge(
+                        "critic2",
+                        execution_status="skipped",
+                        failure_reason="no_density_cube_available"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"[{molecule_id}] Critic2 analysis error: {e}")
+                builder.set_external_bridge(
+                    "critic2",
+                    execution_status="failed",
+                    failure_reason=f"external_execution_failed: {e}"
+                )
+        elif critic2_skip_reason:
+            # 策略性跳过
+            logger.info(f"[{molecule_id}] Skipping critic2: {critic2_skip_reason}")
+            builder.set_external_bridge(
+                "critic2",
+                execution_status="skipped",
+                failure_reason=critic2_skip_reason
+            )
+        
+        # 长度校验 (M5: 记录 reason codes)
+        valid, mismatch_reasons = self._validate_feature_lengths(builder, molecule_id)
+        if mismatch_reasons:
+            # 将 length mismatch 记录到 error_messages 和 metadata
+            for reason in mismatch_reasons:
+                builder.add_error(f"Feature validation: {reason}")
+            # 存储到 builder 的特殊字段供 StatusDeterminer 使用
+            builder.data["_validation_errors"] = mismatch_reasons
+        
+        # 记录耗时到 runtime_metadata（正式 schema）
+        elapsed = time.time() - start_time
+        builder.data["runtime_metadata"]["unified_extraction_time_seconds"] = elapsed
+        builder.data["runtime_metadata"]["extraction_timestamp"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        )
+        
+        # 最终化（所有状态判定在此执行）
+        result = builder.build()
+        
+        logger.info(
+            f"[{molecule_id}] Unified extraction completed: "
+            f"status={result['calculation_status']['overall_status']}, "
+            f"time={elapsed:.3f}s"
+        )
+        
+        return result
+    
+    def _detect_point_group(self, mol) -> Optional[str]:
+        """检测分子点群"""
+        try:
+            from pyscf import symm
+            point_group = symm.geom.detect_symm(mol.atom)[0]
+            return point_group
+        except Exception:
+            return "C1"
+    
+    def _symbol_to_atomic_num(self, symbol: str) -> int:
+        """元素符号转原子序数"""
+        periodic_table = {
+            'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'Ne': 10,
+            'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15, 'S': 16, 'Cl': 17, 'Ar': 18,
+            'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22, 'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26,
+            'Co': 27, 'Ni': 28, 'Cu': 29, 'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34,
+            'Br': 35, 'Kr': 36, 'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Nb': 41, 'Mo': 42,
+            'Tc': 43, 'Ru': 44, 'Rh': 45, 'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50,
+            'Sb': 51, 'Te': 52, 'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Ce': 58,
+            'Pr': 59, 'Nd': 60, 'Pm': 61, 'Sm': 62, 'Eu': 63, 'Gd': 64, 'Tb': 65, 'Dy': 66,
+            'Ho': 67, 'Er': 68, 'Tm': 69, 'Yb': 70, 'Lu': 71, 'Hf': 72, 'Ta': 73, 'W': 74,
+            'Re': 75, 'Os': 76, 'Ir': 77, 'Pt': 78, 'Au': 79, 'Hg': 80, 'Tl': 81, 'Pb': 82,
+            'Bi': 83, 'Po': 84, 'At': 85, 'Rn': 86
+        }
+        return periodic_table.get(symbol.capitalize(), 0)
+
+    def save_unified_features(
+        self,
+        unified_data: Dict[str, Any],
+        output_path: str,
+    ) -> str:
+        """
+        保存统一 Schema 特征到文件
+        
+        Args:
+            unified_data: 统一 Schema 字典
+            output_path: 输出路径（不含扩展名）
+            
+        Returns:
+            保存的文件路径
+        """
+        from pathlib import Path
+        
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 使用 numpy 安全的 JSON 序列化
+        class NumpyEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                if isinstance(obj, np.floating):
+                    return float(obj)
+                if isinstance(obj, np.bool_):
+                    return bool(obj)
+                return super().default(obj)
+        
+        if self.output_format == "hdf5":
+            output_file = output_path.with_suffix(".h5")
+            with h5py.File(output_file, 'w') as f:
+                self._dict_to_hdf5(f, unified_data)
+        else:
+            output_file = output_path.with_suffix(".unified.json")
+            with open(output_file, 'w') as f:
+                json.dump(unified_data, f, indent=2, cls=NumpyEncoder)
+        
+        logger.info(f"Unified features saved to {output_file}")
+        return str(output_file)
+    
+    def _validate_feature_lengths(self, builder, molecule_id: str) -> tuple[bool, list]:
+        """
+        校验 atom_features 和 bond_features 的长度一致性和有效性
+        
+        M5: 将所有 mismatch 记录为 reason codes，影响最终状态判定
+        
+        Returns:
+            (是否通过校验, reason_codes 列表)
+        """
+        data = builder.data
+        natm = data["molecule_info"]["natm"]
+        reason_codes = []
+        
+        if natm is None:
+            return True, reason_codes  # 尚无原子数信息，跳过校验
+        
+        atom_feat = data["atom_features"]
+        
+        # 1. 检查所有原子级特征数组长度是否等于 natm
+        atom_arrays = [
+            ("atomic_number", atom_feat.get("atomic_number")),
+            ("charge_mulliken", atom_feat.get("charge_mulliken")),
+            ("charge_hirshfeld", atom_feat.get("charge_hirshfeld")),
+            ("charge_cm5", atom_feat.get("charge_cm5")),
+            ("charge_iao", atom_feat.get("charge_iao")),
+            ("elf_value", atom_feat.get("elf_value")),
+        ]
+        
+        for name, arr in atom_arrays:
+            if arr is not None and len(arr) != natm:
+                logger.warning(
+                    f"[{molecule_id}] Length mismatch: {name} has {len(arr)} elements, "
+                    f"expected {natm} (natm)"
+                )
+                reason_codes.append(f"atom_feature_length_mismatch_{name}")
+        
+        # 检查键特征
+        bond_feat = data["bond_features"]
+        bond_indices = bond_feat.get("bond_indices")
+        
+        if bond_indices is None:
+            # 空键分子，跳过后续键检查
+            return len(reason_codes) == 0, reason_codes
+        
+        if not isinstance(bond_indices, list):
+            logger.warning(f"[{molecule_id}] bond_indices is not a list")
+            reason_codes.append("bond_indices_invalid_format")
+            return False, reason_codes
+        
+        n_bonds = len(bond_indices)
+        
+        # 2. 检查键特征数组长度是否一致
+        bond_arrays = [
+            ("bond_orders_mayer", bond_feat.get("bond_orders_mayer")),
+            ("bond_orders_wiberg", bond_feat.get("bond_orders_wiberg")),
+            ("elf_bond_midpoint", bond_feat.get("elf_bond_midpoint")),
+        ]
+        
+        for name, arr in bond_arrays:
+            if arr is not None and len(arr) != n_bonds:
+                logger.warning(
+                    f"[{molecule_id}] Length mismatch: {name} has {len(arr)} elements, "
+                    f"expected {n_bonds} (n_bonds)"
+                )
+                reason_codes.append(f"bond_feature_length_mismatch_{name}")
+        
+        # 3. 检查 bond_types_rdkit 长度
+        bond_types = bond_feat.get("bond_types_rdkit")
+        if bond_types is not None and len(bond_types) != n_bonds:
+            logger.warning(
+                f"[{molecule_id}] Length mismatch: bond_types_rdkit has {len(bond_types)} elements, "
+                f"expected {n_bonds} (n_bonds)"
+            )
+            reason_codes.append("bond_feature_length_mismatch_bond_types_rdkit")
+        
+        # 4-6. 检查 bond_indices 有效性
+        seen_bonds = set()
+        
+        for idx, bond in enumerate(bond_indices):
+            if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+                logger.warning(f"[{molecule_id}] Invalid bond format at index {idx}: {bond}")
+                reason_codes.append("bond_indices_invalid_format")
+                continue
+            
+            i, j = bond
+            
+            # 4. 检查越界
+            if not (0 <= i < natm and 0 <= j < natm):
+                logger.warning(
+                    f"[{molecule_id}] Bond index out of range at bond {idx}: "
+                    f"[{i}, {j}], natm={natm}"
+                )
+                reason_codes.append("bond_indices_out_of_range")
+            
+            # 5. 检查 self-loop
+            if i == j:
+                logger.warning(f"[{molecule_id}] Self-loop detected at bond {idx}: [{i}, {j}]")
+                reason_codes.append("bond_indices_self_loop")
+            
+            # 6. 检查无向重复边
+            canonical = (min(i, j), max(i, j))
+            if canonical in seen_bonds:
+                logger.warning(
+                    f"[{molecule_id}] Duplicate bond detected at index {idx}: "
+                    f"[{i}, {j}] (canonical: {canonical})"
+                )
+                reason_codes.append("bond_indices_duplicate")
+            seen_bonds.add(canonical)
+        
+        return len(reason_codes) == 0, list(set(reason_codes))  # 去重
+    
+    def _align_elf_to_bond_indices(
+        self,
+        elf_midpoints: List[float],
+        elf_bond_pairs: List[tuple],
+        bond_indices: List[List[int]],
+        molecule_id: str
+    ) -> tuple[List[float], dict]:
+        """
+        对齐 ELF bond midpoints 到 bond_indices
+        
+        M5.5: 使用无向排序键 (min, max) 作为 join key
+        
+        Args:
+            elf_midpoints: ELF 计算的键中点值
+            elf_bond_pairs: ELF 计算的键原子对列表
+            bond_indices: 目标 bond_indices（来自 RDKit 或 Mayer 阈值）
+            molecule_id: 分子 ID
+            
+        Returns:
+            (对齐后的 midpoints, 对齐统计信息)
+        """
+        stats = {
+            "raw_count": len(elf_midpoints),
+            "aligned_count": 0,
+            "dropped_count": 0,
+        }
+        
+        if not bond_indices:
+            # 无 bond_indices，返回空
+            stats["dropped_count"] = len(elf_midpoints)
+            return [], stats
+        
+        if not elf_midpoints or not elf_bond_pairs:
+            # 无 ELF 数据，返回零填充
+            return [0.0] * len(bond_indices), stats
+        
+        # 构建 ELF 数据字典：key = 无向排序键, value = midpoint
+        elf_dict = {}
+        for pair, midpoint in zip(elf_bond_pairs, elf_midpoints):
+            # 统一使用无向排序键
+            canonical = (min(pair[0], pair[1]), max(pair[0], pair[1]))
+            if canonical in elf_dict:
+                logger.warning(f"[{molecule_id}] Duplicate ELF bond: {canonical}")
+            elf_dict[canonical] = midpoint
+        
+        # 按 bond_indices 顺序重建 midpoints
+        aligned_midpoints = []
+        for bond in bond_indices:
+            canonical = (min(bond[0], bond[1]), max(bond[0], bond[1]))
+            if canonical in elf_dict:
+                aligned_midpoints.append(elf_dict[canonical])
+                stats["aligned_count"] += 1
+            else:
+                # bond_indices 中有，但 ELF 中没有 -> 填充 0.0
+                aligned_midpoints.append(0.0)
+                logger.debug(f"[{molecule_id}] Bond {bond} not found in ELF, filling 0.0")
+        
+        # 计算 dropped（ELF 中有，但 bond_indices 中没有）
+        bond_indices_set = {
+            (min(b[0], b[1]), max(b[0], b[1])) for b in bond_indices
+        }
+        for canonical in elf_dict:
+            if canonical not in bond_indices_set:
+                stats["dropped_count"] += 1
+        
+        if stats["dropped_count"] > 0 or stats["aligned_count"] < len(bond_indices):
+            logger.info(
+                f"[{molecule_id}] ELF alignment: "
+                f"raw={stats['raw_count']}, "
+                f"aligned={stats['aligned_count']}, "
+                f"dropped={stats['dropped_count']}, "
+                f"target={len(bond_indices)}"
+            )
+        
+        return aligned_midpoints, stats

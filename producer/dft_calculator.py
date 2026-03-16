@@ -453,11 +453,13 @@ class DFTCalculator:
                     logger.error(f"[{molecule_id}] === TRACEBACK END ===")
                     logger.warning(f"[{molecule_id}] ⚠️ Falling back to CPU mode")
             
+            mol_obj.verbose = 0  # M5: 静音
             if mol_obj.natm > 6: 
                 logger.info(f"[{molecule_id}] Using density fitting for CPU calculation")
                 mf = dft.RKS(mol_obj).density_fit()
             else:
                 mf = dft.RKS(mol_obj)
+            mf.verbose = 0  # M5: 静音
             mf.xc = self.functional
             try:
                 mf.disp = 'd3bj'

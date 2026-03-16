@@ -145,6 +145,7 @@ def consumer_worker(
     output_dir: str,
     stop_event: Event,
     shared_queue=None,  # 传入共享队列
+    dft_config: dict = None,  # DFT 配置（用于 unified provenance）
 ):
     """
     CPU 消费者工作进程
@@ -155,11 +156,13 @@ def consumer_worker(
         output_dir: 输出目录
         stop_event: 停止事件
         shared_queue: 共享队列实例
+        dft_config: DFT 配置信息
     """
     logger.info("Consumer worker started")
     
-    # 从配置中提取 save_fock_matrix 参数
+    # 从配置中提取参数
     save_fock_matrix = extractor_config.pop("save_fock_matrix", False)
+    enable_unified_output = extractor_config.pop("enable_unified_output", True)  # 默认启用
     
     # 初始化组件（使用共享队列）
     extractor = FeatureExtractor(**extractor_config)
@@ -170,6 +173,8 @@ def consumer_worker(
     
     success_count = 0
     failed_count = 0
+    unified_success_count = 0
+    unified_failed_count = 0
     poison_pill_received = False
     
     try:
@@ -191,40 +196,83 @@ def consumer_worker(
             pkl_path = task["pkl_path"]
             smiles = task.get("smiles")  # 防御性编程提取 smiles
             
+            # ========== 原有输出逻辑（保持不变）==========
+            old_success = False
             try:
-                logger.info(f"[{molecule_id}] Extracting features...")
+                logger.info(f"[{molecule_id}] Extracting features (legacy)...")
                 
-                # 提取特征
-                features = extractor.extract_all_features(pkl_path, molecule_id, smiles=smiles, save_fock_matrix=save_fock_matrix)
+                features = extractor.extract_all_features(
+                    pkl_path, molecule_id, smiles=smiles, save_fock_matrix=save_fock_matrix
+                )
                 
                 if features["success"]:
-                    # 保存特征
                     output_path = Path(output_dir) / molecule_id
                     extractor.save_features(features, str(output_path))
-                    
-                    # 删除临时 pickle 文件
-                    try:
-                        Path(pkl_path).unlink()
-                        logger.debug(f"[{molecule_id}] Removed temp file: {pkl_path}")
-                    except Exception as e:
-                        logger.warning(f"[{molecule_id}] Failed to remove temp file: {e}")
-                    
+                    old_success = True
                     success_count += 1
-                    logger.success(f"[{molecule_id}] Features extracted and saved")
+                    logger.success(f"[{molecule_id}] Legacy features saved")
                 else:
                     failed_count += 1
-                    logger.error(f"[{molecule_id}] Feature extraction failed: {features['error']}")
-                
-                queue.task_done()
-                
+                    logger.error(f"[{molecule_id}] Legacy extraction failed: {features['error']}")
+                    
             except Exception as e:
                 failed_count += 1
-                logger.error(f"[{molecule_id}] Consumer error: {e}")
-                queue.task_done()
+                logger.error(f"[{molecule_id}] Legacy consumer error: {e}")
+            
+            # ========== Unified 输出逻辑（双写模式）==========
+            unified_status = "skipped"
+            unified_time = 0.0
+            
+            if enable_unified_output:
+                try:
+                    import time
+                    unified_start = time.time()
+                    
+                    logger.info(f"[{molecule_id}] Extracting features (unified)...")
+                    
+                    unified_data = extractor.extract_unified(
+                        pkl_path=pkl_path,
+                        molecule_id=molecule_id,
+                        smiles=smiles,
+                        save_fock_matrix=save_fock_matrix,
+                        dft_config=dft_config,
+                    )
+                    
+                    unified_time = time.time() - unified_start
+                    unified_status = unified_data["calculation_status"]["overall_status"]
+                    
+                    # 保存 unified 输出
+                    output_path = Path(output_dir) / "unified" / molecule_id
+                    extractor.save_unified_features(unified_data, str(output_path))
+                    
+                    unified_success_count += 1
+                    logger.success(
+                        f"[{molecule_id}] Unified features saved: "
+                        f"status={unified_status}, time={unified_time:.3f}s"
+                    )
+                    
+                except Exception as e:
+                    unified_failed_count += 1
+                    unified_status = "failed"
+                    logger.error(f"[{molecule_id}] Unified extraction failed: {e}")
+            
+            # 删除临时 pickle 文件（如果任一成功）
+            if old_success or unified_status not in ["failed", "skipped"]:
+                try:
+                    Path(pkl_path).unlink()
+                    logger.debug(f"[{molecule_id}] Removed temp file: {pkl_path}")
+                except Exception as e:
+                    logger.warning(f"[{molecule_id}] Failed to remove temp file: {e}")
+            
+            queue.task_done()
     
     finally:
         queue.close()
-        logger.info(f"Consumer finished: {success_count} succeeded, {failed_count} failed")
+        logger.info(
+            f"Consumer finished: "
+            f"legacy={success_count}/{failed_count}, "
+            f"unified={unified_success_count}/{unified_failed_count}"
+        )
 
 
 def main():
@@ -372,11 +420,11 @@ def main():
         processes.append(producer)
         logger.info(f"Started Producer-{i} with {len(chunk)} molecules [{start_idx}:{end_idx}]")
     
-    # 消费者进程（传入共享队列）
+    # 消费者进程（传入共享队列和 dft_config）
     for i in range(args.n_consumers):
         consumer = Process(
             target=consumer_worker,
-            args=(queue_config, extractor_config, args.output, stop_event, shared_queue),
+            args=(queue_config, extractor_config, args.output, stop_event, shared_queue, dft_config),
             name=f"Consumer-{i}"
         )
         consumer.start()

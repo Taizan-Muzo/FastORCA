@@ -10,3 +10,36 @@ AGENTS.md
 test_molecules.smi
 fastorca_source.txt
 export_source.py
+bridges/
+cubes/
+test_output_m5/
+test_output_m55_validation/
+test_output_m5_full/
+test_output_m5_full_v2/
+test_output_m5_v2/
+reports/   # 如果里面主要是生成结果
+*.pkl
+*.cube
+*.out
+*.sum
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime artifacts
+cubes/
+bridges/
+test_output*/
+*.pkl
+*.cube
+*.out
+*.sum
+*.log
+
+# Generated reports
+reports/*.json
+reports/generated/
+
+# Temp dirs
+tmp/
+temp/
