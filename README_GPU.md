@@ -261,7 +261,7 @@ time python main.py --input test_1000.smi --output out/ --basis 3-21g --n-produc
 from consumer.feature_extractor import FeatureExtractor
 
 extractor = FeatureExtractor()
-features = extractor.extract_all_features("mol.pkl", "mol_001")
+features = extractor.extract_all_features("mol.pkl", "mol_001", smiles="CCO")
 
 iao_charges = features["features"]["charge_iao"]
 cm5_charges = features["features"]["charge_cm5"]

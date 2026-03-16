@@ -216,6 +216,7 @@ def test_pipeline_end_to_end():
                 features = extractor.extract_all_features(
                     result["pkl_path"],
                     molecule_id,
+                    smiles=smiles,
                 )
                 
                 if not features["success"]:
@@ -296,6 +297,7 @@ def test_new_features():
             features = extractor.extract_all_features(
                 result["pkl_path"],
                 molecule_id,
+                smiles=test_smiles,  # 传递 SMILES
                 save_fock_matrix=True,  # 测试 Fock 矩阵保存
             )
             

@@ -10,16 +10,17 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import time
-
+from pyscf import symm
 import numpy as np
 import scipy
 from loguru import logger
-
+from rdkit.Chem import Descriptors, rdMolDescriptors, Lipinski
 # PySCF imports for wavefunction analysis
 from pyscf import gto, scf, dft
 from pyscf.lo import orth
 from pyscf import lib
 import pickle
+from rdkit import Chem
 
 # Optional: HDF5 support
 try:
@@ -62,6 +63,82 @@ class FeatureExtractor:
             self.output_format = "json"
         
         logger.info(f"FeatureExtractor initialized (Multiwfn: {use_multiwfn})")
+    
+    def extract_rdkit_global_features(self, mol_rdkit) -> dict:
+        """
+        提取 RDKit 全局理化特征 (对应 qcMol Supplementary Table 4)
+        """
+        
+        return {
+            "Molecular Size": mol_rdkit.GetNumAtoms(),
+            "Molecular Weight": Descriptors.MolWt(mol_rdkit),
+            "LogP": Descriptors.MolLogP(mol_rdkit),
+            "TPSA": Descriptors.TPSA(mol_rdkit),
+            "H Bond Donor": Lipinski.NumHDonors(mol_rdkit),
+            "H Bond Acceptor": Lipinski.NumHAcceptors(mol_rdkit),
+            "Rotatable Bonds": Lipinski.NumRotatableBonds(mol_rdkit),
+            "Heavy Atom Count": mol_rdkit.GetNumHeavyAtoms()
+        }
+
+    def extract_rdkit_atom_features(self, mol_rdkit) -> list:
+        """
+        提取 RDKit 节点 (原子) 特征 (对应 qcMol Supplementary Table 5)
+        """
+        atom_features = []
+        for atom in mol_rdkit.GetAtoms():
+            atom_features.append({
+                "Index": atom.GetIdx(),
+                "Element Type": atom.GetSymbol(),
+                "Atomic Number": atom.GetAtomicNum(),
+                "Chiral Tag": str(atom.GetChiralTag()),
+                "Degree": atom.GetDegree(),
+                "Number of hydrogens": atom.GetTotalNumHs(),
+                "Formal Charge": atom.GetFormalCharge(),
+                "Radical Electrons": atom.GetNumRadicalElectrons(),
+                "Aromatic": atom.GetIsAromatic(),
+                "In Ring": atom.IsInRing(),
+                "Hybridization Type": str(atom.GetHybridization())
+            })
+        return atom_features
+
+    def extract_rdkit_bond_features(self, mol_rdkit) -> list:
+        """
+        提取 RDKit 边 (化学键) 特征 (对应 qcMol Supplementary Table 6)
+        """
+        bond_features = []
+        for bond in mol_rdkit.GetBonds():
+            begin_atom = bond.GetBeginAtom()
+            end_atom = bond.GetEndAtom()
+            bond_features.append({
+                "Source Atom Index": begin_atom.GetIdx(),
+                "Source Atom Symbol": begin_atom.GetSymbol(),
+                "Target Atom Index": end_atom.GetIdx(),
+                "Target Atom Symbol": end_atom.GetSymbol(),
+                "Bond Type": str(bond.GetBondType()),
+                "Stereo": str(bond.GetStereo()),
+                "Conjugated": bond.GetIsConjugated(),
+                "In Ring": bond.IsInRing(),
+                "Aromatic": bond.GetIsAromatic()
+            })
+        return bond_features
+
+    def extract_pyscf_global_features(self, mol) -> dict:
+        """
+        提取 PySCF 原生全局量子特征 (对应 qcMol Supplementary Table 4)
+        """
+        
+        # 尝试检测分子点群 (Point Group)
+        try:
+            point_group = symm.geom.detect_symm(mol.atom)[0]
+        except Exception:
+            point_group = "C1"  # 如果检测失败，默认降级为 C1 点群 (无对称性)
+            
+        return {
+            # PySCF 的 mol.spin 存储的是未成对电子数 (2S)。
+            # 自旋多重度 (Multiplicity) = 2S + 1
+            "Multiplicity": mol.spin + 1,
+            "Point Group": point_group
+        }
     
     def load_wavefunction(self, pkl_path: str) -> Tuple[gto.Mole, dft.rks.RKS]:
         """
@@ -780,19 +857,24 @@ class FeatureExtractor:
         self,
         pkl_path: str,
         molecule_id: str,
+        smiles: str = None,  # 新增：需要 SMILES 来重建 RDKit 拓扑图
         save_fock_matrix: bool = False,
     ) -> Dict[str, Any]:
         """
-        从 pickle 文件提取所有特征
+        从 pickle 文件提取所有特征，并结合 RDKit 补充拓扑特征
         
         Args:
             pkl_path: pickle 文件路径
             molecule_id: 分子标识
+            smiles: 原始 SMILES 字符串，用于提取图拓扑和理化特征
             save_fock_matrix: 是否保存 Fock 矩阵（数据量大，谨慎使用）
             
         Returns:
             包含所有特征的字典
         """
+        import time
+        from loguru import logger
+        
         start_time = time.time()
         
         result = {
@@ -806,15 +888,41 @@ class FeatureExtractor:
         try:
             # 加载波函数
             mol, mf = self.load_wavefunction(pkl_path)
-            
-            # 提取特征
             features = {}
             
+            # ==========================================
+            # 新增模块 1: RDKit 拓扑与理化特征
+            # ==========================================
+            if smiles:
+                try:
+                    from rdkit import Chem
+                    mol_rdkit = Chem.MolFromSmiles(smiles)
+                    if mol_rdkit is not None:
+                        # 必须加氢以对齐 PySCF 的全原子系统，否则节点数量对不上
+                        mol_rdkit = Chem.AddHs(mol_rdkit)
+                        features["rdkit_global"] = self.extract_rdkit_global_features(mol_rdkit)
+                        features["rdkit_atoms"] = self.extract_rdkit_atom_features(mol_rdkit)
+                        features["rdkit_bonds"] = self.extract_rdkit_bond_features(mol_rdkit)
+                    else:
+                        logger.warning(f"[{molecule_id}] RDKit 无法解析 SMILES '{smiles}'，拓扑特征缺失")
+                except ImportError:
+                    logger.warning(f"[{molecule_id}] RDKit 未安装，跳过拓扑特征提取")
+            else:
+                logger.debug(f"[{molecule_id}] 未提供 SMILES，跳过 RDKit 拓扑特征提取")
+
+            # ==========================================
+            # 新增模块 2: PySCF 补充全局量子特征
+            # ==========================================
+            features["pyscf_global"] = self.extract_pyscf_global_features(mol)
+            
+            # ==========================================
+            # 核心模块 3: 原生波函数特征 (保持不变)
+            # ==========================================
             # 1. 电荷 (高精度方案)
             features["charge_iao"] = self.extract_iao_charges(mol, mf).tolist()  # IAO 电荷 (NPA 平替)
             features["charge_cm5"] = self.extract_cm5_charges(mol, mf).tolist()  # CM5 电荷 (Hirshfeld 修正)
-            features["hirshfeld_charges"] = self.extract_hirshfeld_charges(mol, mf).tolist()  # 保留作为参考
-            features["mulliken_charges"] = self.extract_mulliken_charges(mol, mf).tolist()  # 保留作为参考
+            features["hirshfeld_charges"] = self.extract_hirshfeld_charges(mol, mf).tolist()  
+            features["mulliken_charges"] = self.extract_mulliken_charges(mol, mf).tolist()  
             
             # 2. 键级
             features["mayer_bond_orders"] = self.extract_mayer_bond_orders(mol, mf).tolist()
@@ -826,12 +934,12 @@ class FeatureExtractor:
             
             # 4. IAO 矩阵 (轨道相互作用信息)
             iao_matrix = self.extract_iao_matrix(mol, mf)
-            features["iao_charges"] = iao_matrix["iao_charges"]
+            features["iao_charges_matrix"] = iao_matrix["iao_charges"] # 为避免与外层电荷命名冲突略作区分
             if save_fock_matrix and iao_matrix["iao_fock"] is not None:
                 features["iao_fock_matrix"] = iao_matrix["iao_fock"]  # 大矩阵，可选保存
             features["iao_atomic_slices"] = iao_matrix["atomic_slices"]
             
-            # 5. 全局分子特征
+            # 5. 全局分子特征 (HOMO, LUMO, Gap, Dipole)
             global_features = self.extract_global_features(mol, mf)
             features.update(global_features)
             
@@ -856,7 +964,7 @@ class FeatureExtractor:
             logger.debug(traceback.format_exc())
         
         return result
-    
+
     def save_features(
         self,
         features: Dict[str, Any],

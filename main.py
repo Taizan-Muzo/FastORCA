@@ -114,6 +114,7 @@ def producer_worker(
                     task = {
                         "molecule_id": molecule_id,
                         "pkl_path": result["pkl_file"],
+                        "smiles": smiles,  # 顶层传递 smiles 供特征提取使用
                         "metadata": {
                             "smiles": smiles,
                             "energy": result["energy"],
@@ -188,12 +189,13 @@ def consumer_worker(
             
             molecule_id = task["molecule_id"]
             pkl_path = task["pkl_path"]
+            smiles = task.get("smiles")  # 防御性编程提取 smiles
             
             try:
                 logger.info(f"[{molecule_id}] Extracting features...")
                 
                 # 提取特征
-                features = extractor.extract_all_features(pkl_path, molecule_id, save_fock_matrix=save_fock_matrix)
+                features = extractor.extract_all_features(pkl_path, molecule_id, smiles=smiles, save_fock_matrix=save_fock_matrix)
                 
                 if features["success"]:
                     # 保存特征

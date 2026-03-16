@@ -97,9 +97,9 @@ class DFTCalculator:
         logger.info(f"Geometry optimization: {geometry_optimization} ({geo_opt_method})")
         
         if geometry_optimization:
-            if geo_opt_method == "xtb" and not XTB_AVAILABLE:
-                logger.warning("xtb-python not available, falling back to pyscf hybrid")
-                self.geo_opt_method = "pyscf"
+            # if geo_opt_method == "xtb" and not XTB_AVAILABLE:
+            #     logger.warning("xtb-python not available, falling back to pyscf hybrid")
+            self.geo_opt_method = "pyscf"
                 
         if GPU_AVAILABLE:
             compatible, msg = check_basis_gpu_compatibility(basis)
@@ -187,7 +187,7 @@ class DFTCalculator:
             mol.spin = spin
             mol.verbose = self.verbose
             mol.max_memory = self.max_memory
-            mol.cart = True  # <-- 【核心修改 2】：强制笛卡尔坐标
+            # mol.cart = True  # <-- 【核心修改 2】：强制笛卡尔坐标
             mol.build()
             
             logger.info(f"Created Mole from XYZ: {xyz_file}")
@@ -305,7 +305,7 @@ class DFTCalculator:
             mol_opt.spin = mol_obj.spin
             mol_opt.verbose = mol_obj.verbose
             mol_opt.max_memory = mol_obj.max_memory
-            mol_opt.cart = True # 保持笛卡尔
+            # mol_opt.cart = True # 保持笛卡尔
             mol_opt.build()
             
             final_energy = atoms.get_potential_energy()
@@ -334,9 +334,9 @@ class DFTCalculator:
         logger.info(f"[{molecule_id}] 🚀 Switching to Hybrid Architecture: GPU SCF + CPU Gradient")
         
         # 二次确认笛卡尔坐标状态
-        if not getattr(mol_obj, 'cart', False):
-            mol_obj.cart = True
-            mol_obj.build()
+        # if not getattr(mol_obj, 'cart', False):
+        #     mol_obj.cart = True
+        #     mol_obj.build()
         
         init_coords_bohr = mol_obj.atom_coords().flatten()
         iteration = [0]
@@ -350,6 +350,16 @@ class DFTCalculator:
             # GPU 计算能量
             mf_gpu = GPU_RKS(mol_step).density_fit(auxbasis='def2-svp-jkfit')
             mf_gpu.xc = self.functional
+
+            # 【新增】：启用色散校正
+            try:
+                mf_gpu.disp = 'd3bj'
+            except Exception:
+                pass
+            
+            # 【新增】：启用 Level Shift 阻断高对称分子的轨道震荡
+            mf_gpu.level_shift = 0.1
+
             mf_gpu.conv_tol = self.scf_conv_tol
             energy = mf_gpu.kernel()
             
@@ -397,9 +407,9 @@ class DFTCalculator:
         start_time = time.time()
         
         # 二次确认确保 SP 阶段也是笛卡尔坐标
-        if not getattr(mol_obj, 'cart', False):
-            mol_obj.cart = True
-            mol_obj.build()
+        # if not getattr(mol_obj, 'cart', False):
+        #     mol_obj.cart = True
+        #     mol_obj.build()
         
         try:
             if GPU_AVAILABLE:
@@ -407,6 +417,16 @@ class DFTCalculator:
                 try:
                     mf = GPU_RKS(mol_obj).density_fit(auxbasis='def2-svp-jkfit')
                     mf.xc = self.functional
+
+                    # 【新增】：启用色散校正
+                    try:
+                        mf.disp = 'd3bj'
+                    except Exception:
+                        pass
+                        
+                    # 【新增】：启用 Level Shift
+                    mf.level_shift = 0.1
+
                     mf.conv_tol = self.scf_conv_tol
                     mf.max_cycle = 100
                     

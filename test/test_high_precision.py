@@ -17,7 +17,7 @@ print("=" * 60)
 # 1. 测试 DFT 计算（含 D3BJ 色散校正）
 print("\n--- 1. 测试 DFT 计算（def2-svp + D3BJ）---")
 
-calc = DFTCalculator(functional="B3LYP", basis="def2-svp")
+calc = DFTCalculator(functional="B3LYP", basis="def2-tzvp", geo_opt_method='pyscf')
 mol = calc.from_smiles("c1ccccc1")
 
 print(f"分子: 苯环 (C6H6)")
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     print("\n--- 2. 测试高级电荷分析 ---")
     
     extractor = FeatureExtractor()
-    features = extractor.extract_all_features(result["pkl_file"], "benzene_test")
+    features = extractor.extract_all_features(result["pkl_file"], "benzene_test", smiles="c1ccccc1")
     
     if features["success"]:
         print("✅ 特征提取成功\n")

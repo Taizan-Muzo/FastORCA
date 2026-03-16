@@ -484,6 +484,7 @@ extractor = FeatureExtractor()
 features = extractor.extract_all_features(
     result["pkl_path"], 
     "ethanol",
+    smiles="CCO",
     save_fock_matrix=True  # 保存 IAO Fock 矩阵
 )
 
