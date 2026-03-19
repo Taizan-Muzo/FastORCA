@@ -104,29 +104,30 @@ class UnifiedOutputBuilder:
                     "element_type": {"mapped_path": "geometry.atom_symbols", "status": "implemented_exact"},
                     "XYZ": {"mapped_path": "geometry.atom_coords_angstrom", "status": "implemented_exact"},
                     "NAO_descriptors": {
-                        "mapped_path": None,
+                        "mapped_path": "external_bridge_roadmap.atom_level.nao_descriptors",
                         "status": "missing",
                         "needs_exact_qcmol_name": True,  # NAO descriptor definition must follow qcMol exact naming
                     },
                     "LI_values": {
-                        "mapped_path": None,
+                        "mapped_path": "external_bridge_roadmap.atom_level.li_values",
                         "status": "missing",
                         "needs_exact_qcmol_name": True,  # LI abbreviation needs exact qcMol expansion
                     },
-                    "ADCH_charges": {"mapped_path": None, "status": "missing"},
-                    "NBO_LP": {"mapped_path": None, "status": "missing"},
+                    "ADCH_charges": {"mapped_path": "external_bridge_roadmap.atom_level.adch_charges", "status": "missing"},
+                    "NBO_LP": {"mapped_path": "external_bridge_roadmap.atom_level.nbo_lp", "status": "missing"},
                     "NPA": {"mapped_path": "atom_features.charge_iao", "status": "implemented_proxy"},
+                    "NPA_exact": {"mapped_path": "external_bridge_roadmap.atom_level.npa_exact", "status": "missing"},
                 },
                 "bond_features": {
                     "stereo_info": {"mapped_path": "bond_features.bond_stereo_info", "status": "implemented_proxy"},
                     "DI_values_or_matrix": {
-                        "mapped_path": None,
+                        "mapped_path": "external_bridge_roadmap.bond_level.di_values_or_matrix",
                         "status": "missing",
                         "needs_exact_qcmol_name": True,  # DI metric definition/name must follow qcMol exact term
                     },
                     "ELF_values": {"mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented_exact"},
-                    "NBO_BD": {"mapped_path": None, "status": "missing"},
-                    "LBO": {"mapped_path": None, "status": "missing"},
+                    "NBO_BD": {"mapped_path": "external_bridge_roadmap.bond_level.nbo_bd", "status": "missing"},
+                    "LBO": {"mapped_path": "external_bridge_roadmap.bond_level.lbo", "status": "missing"},
                     "Mayer_BL": {"mapped_path": "bond_features.bond_orders_mayer", "status": "partial"},
                 },
                 "structural_features": {
@@ -372,6 +373,87 @@ class UnifiedOutputBuilder:
                         }
                     }
                 }
+            },
+
+            # External bridge roadmap placeholders (M5.5)
+            # Keep exact qcMol naming decisions deferred where marked by needs_exact_qcmol_name.
+            "external_bridge_roadmap": {
+                "atom_level": {
+                    "nao_descriptors": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": True,
+                        "notes": "Placeholder for NAO descriptor payload from external bridge toolchain.",
+                    },
+                    "adch_charges": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Placeholder for ADCH charges.",
+                    },
+                    "nbo_lp": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Placeholder for NBO lone pair descriptors.",
+                    },
+                    "npa_exact": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Exact NPA placeholder; do not confuse with IAO proxy.",
+                    },
+                    "li_values": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": True,
+                        "notes": "Placeholder for LI values; abbreviation expansion pending paper-exact naming.",
+                    },
+                },
+                "bond_level": {
+                    "di_values_or_matrix": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": True,
+                        "notes": "Placeholder for DI values/matrix with exact qcMol naming pending.",
+                    },
+                    "nbo_bd": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Placeholder for NBO bond descriptors.",
+                    },
+                    "lbo": {
+                        "available": False,
+                        "status": "missing",
+                        "source": "external_bridge",
+                        "value": None,
+                        "is_proxy": False,
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Placeholder for localized bond order payload.",
+                    },
+                },
             }
         }
     
@@ -556,6 +638,21 @@ class UnifiedOutputBuilder:
         """
         if tool in self.data["external_features"]:
             self.data["external_features"][tool].update(features)
+        return self
+
+    def set_external_bridge_roadmap(self, level: str, feature: str, **kwargs) -> "UnifiedOutputBuilder":
+        """
+        设置 external bridge roadmap 占位字段
+
+        Args:
+            level: "atom_level" | "bond_level"
+            feature: placeholder 特征名
+        """
+        roadmap = self.data.get("external_bridge_roadmap", {})
+        if level in roadmap and feature in roadmap[level] and isinstance(roadmap[level][feature], dict):
+            for key, value in kwargs.items():
+                if key in roadmap[level][feature]:
+                    roadmap[level][feature][key] = value
         return self
     
     # ============ 状态判定方法 ============
