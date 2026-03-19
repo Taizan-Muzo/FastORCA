@@ -11,10 +11,15 @@ import argparse
 import json
 import math
 import statistics
+import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from consumer.feature_extractor import FeatureExtractor
 from producer.dft_calculator import DFTCalculator
