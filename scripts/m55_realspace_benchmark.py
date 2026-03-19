@@ -56,6 +56,23 @@ DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         "grid_resolution_angstrom": 0.25,
         "margin_angstrom": 3.5,
     },
+    "P5": {
+        "timeout_seconds": 300,
+        "max_atoms": 80,
+        "max_total_grid_points": 2_000_000,
+        "grid_resolution_angstrom": 0.15,
+        "margin_angstrom": 5.0,
+    },
+}
+
+DRIFT_FEATURE_PATHS: Dict[str, List[str]] = {
+    "density_isosurface_volume": ["realspace_features", "density_isosurface_volume", "value_angstrom3"],
+    "density_isosurface_area": ["realspace_features", "density_isosurface_area", "value_angstrom2"],
+    "density_sphericity_like": ["realspace_features", "density_sphericity_like", "value"],
+    "esp_min_hartree": ["realspace_features", "esp_extrema_summary", "min_hartree"],
+    "esp_max_hartree": ["realspace_features", "esp_extrema_summary", "max_hartree"],
+    "orbital_extent_homo": ["realspace_features", "orbital_extent_homo", "value_angstrom"],
+    "orbital_extent_lumo": ["realspace_features", "orbital_extent_lumo", "value_angstrom"],
 }
 
 
@@ -86,6 +103,47 @@ def total_cube_bytes(data: Dict[str, Any]) -> int:
     return total
 
 
+def get_nested(data: Dict[str, Any], path: List[str]) -> Any:
+    cur: Any = data
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
+
+
+def rankdata(values: List[float]) -> List[float]:
+    sorted_idx = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(values):
+        j = i
+        while j + 1 < len(values) and values[sorted_idx[j + 1]] == values[sorted_idx[i]]:
+            j += 1
+        avg_rank = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[sorted_idx[k]] = avg_rank
+        i = j + 1
+    return ranks
+
+
+def pearson_corr(x: List[float], y: List[float]) -> float:
+    if len(x) < 2 or len(y) < 2:
+        return 0.0
+    mx = statistics.mean(x)
+    my = statistics.mean(y)
+    num = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    den_x = math.sqrt(sum((a - mx) ** 2 for a in x))
+    den_y = math.sqrt(sum((b - my) ** 2 for b in y))
+    if den_x <= 1e-12 or den_y <= 1e-12:
+        return 0.0
+    return num / (den_x * den_y)
+
+
+def spearman_corr(x: List[float], y: List[float]) -> float:
+    return pearson_corr(rankdata(x), rankdata(y))
+
+
 def build_plugin_plan(profile_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {
         "orbital_features": {
@@ -102,6 +160,10 @@ def build_plugin_plan(profile_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                 "max_total_grid_points": profile_cfg["max_total_grid_points"],
                 "grid_resolution_angstrom": profile_cfg["grid_resolution_angstrom"],
                 "margin_angstrom": profile_cfg["margin_angstrom"],
+                "realspace_core_features_enabled": True,
+                "realspace_core_features_expected": True,
+                "realspace_extended_features_enabled": True,
+                "realspace_extended_features_expected": True,
             },
         },
         "critic2_bridge": {
@@ -172,6 +234,59 @@ def choose_recommendations(profile_summaries: Dict[str, Dict[str, Any]]) -> Dict
     }
 
 
+def compute_drift_vs_baseline(
+    profile_rows: Dict[str, List[Dict[str, Any]]],
+    baseline_profile: str,
+) -> Dict[str, Any]:
+    if baseline_profile not in profile_rows:
+        return {}
+
+    base_rows = {r["molecule_id"]: r for r in profile_rows[baseline_profile]}
+    report: Dict[str, Any] = {}
+    eps = 1e-12
+
+    for profile, rows in profile_rows.items():
+        if profile == baseline_profile:
+            continue
+        per_feature: Dict[str, Any] = {}
+        by_mol = {r["molecule_id"]: r for r in rows}
+        common_ids = sorted(set(by_mol.keys()) & set(base_rows.keys()))
+
+        for feat_name in DRIFT_FEATURE_PATHS:
+            rel_errs: List[float] = []
+            vals = []
+            base_vals = []
+            for mid in common_ids:
+                v = by_mol[mid]["feature_values"].get(feat_name)
+                b = base_rows[mid]["feature_values"].get(feat_name)
+                if v is None or b is None:
+                    continue
+                rel_err = abs(v - b) / max(abs(b), eps)
+                rel_errs.append(float(rel_err))
+                vals.append(float(v))
+                base_vals.append(float(b))
+
+            if rel_errs:
+                per_feature[feat_name] = {
+                    "n": len(rel_errs),
+                    "mean_relative_error": float(statistics.mean(rel_errs)),
+                    "p90_relative_error": float(percentile(rel_errs, 90)),
+                    "max_relative_error": float(max(rel_errs)),
+                    "spearman_rank_correlation": float(spearman_corr(vals, base_vals)),
+                }
+            else:
+                per_feature[feat_name] = {
+                    "n": 0,
+                    "mean_relative_error": None,
+                    "p90_relative_error": None,
+                    "max_relative_error": None,
+                    "spearman_rank_correlation": None,
+                }
+
+        report[profile] = per_feature
+    return report
+
+
 def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     out_root = Path(args.output_dir).resolve()
     pkl_dir = out_root / "pkl"
@@ -196,8 +311,12 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
 
     profile_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
+    profiles = list(args.profiles)
+    if args.baseline_profile not in profiles:
+        profiles.append(args.baseline_profile)
+
     # Step 2: benchmark profiles
-    for profile_name in args.profiles:
+    for profile_name in profiles:
         if profile_name not in DEFAULT_PROFILES:
             raise ValueError(f"Unknown profile: {profile_name}")
         profile_cfg = DEFAULT_PROFILES[profile_name]
@@ -246,6 +365,10 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
                     "realspace_time_seconds": rs_time if rs_time is not None else total_wall,
                     "total_wall_time_seconds": total_wall,
                     "artifact_bytes": artifact_bytes,
+                    "feature_values": {
+                        feat_name: get_nested(data, path)
+                        for feat_name, path in DRIFT_FEATURE_PATHS.items()
+                    },
                 }
             )
 
@@ -253,12 +376,15 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
         name: aggregate_profile(rows)
         for name, rows in profile_rows.items()
     }
+    drift_vs_baseline = compute_drift_vs_baseline(profile_rows, args.baseline_profile)
     recommendations = choose_recommendations(profile_summaries)
 
     result = {
-        "profiles": {name: DEFAULT_PROFILES[name] for name in args.profiles},
+        "profiles": {name: DEFAULT_PROFILES[name] for name in profiles},
+        "baseline_profile": args.baseline_profile,
         "molecules": [{"molecule_id": m[0], "smiles": m[1]} for m in DEFAULT_MOLECULES],
         "profile_summaries": profile_summaries,
+        "drift_vs_baseline": drift_vs_baseline,
         "rows": profile_rows,
         "recommendations": recommendations,
     }
@@ -266,7 +392,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     report_path = out_root / "realspace_benchmark_summary.json"
     report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Benchmark report saved: {report_path}")
-    for name in args.profiles:
+    for name in profiles:
         s = profile_summaries[name]
         print(
             f"{name}: success_rate={s['success_rate']:.2%}, timeout_rate={s['timeout_rate']:.2%}, "
@@ -285,6 +411,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--functional", default="B3LYP")
     parser.add_argument("--basis", default="sto-3g")
     parser.add_argument("--profiles", nargs="+", default=["P0", "P1", "P2"])
+    parser.add_argument("--baseline-profile", default="P5")
     return parser.parse_args()
 
 

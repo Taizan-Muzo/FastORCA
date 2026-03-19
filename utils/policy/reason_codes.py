@@ -116,6 +116,16 @@ REASON_REGISTRY: Dict[str, Dict[str, Any]] = {
         "severity": "soft_fail",
         "description": "Cube 生成内存不足"
     },
+    "realspace_core_failed": {
+        "scope": "realspace_features",
+        "severity": "soft_fail",
+        "description": "realspace core 层计算失败"
+    },
+    "realspace_extended_failed": {
+        "scope": "realspace_features",
+        "severity": "soft_fail",
+        "description": "realspace extended 层计算失败"
+    },
     "cube_file_corrupted": {
         "scope": "realspace_features",
         "severity": "soft_fail",

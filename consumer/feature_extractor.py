@@ -1498,6 +1498,11 @@ class FeatureExtractor:
                 # 设置 metadata
                 metadata = realspace_result.get("metadata", {})
                 builder.set_realspace_metadata(**metadata)
+                if metadata.get("realspace_definition_version") is not None:
+                    builder.set_provenance(
+                        feature_definition_version=metadata.get("realspace_definition_version"),
+                        realspace_definition_version=metadata.get("realspace_definition_version"),
+                    )
                 
                 status = metadata.get("extraction_status", "unknown")
                 if status == "success":

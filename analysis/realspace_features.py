@@ -12,6 +12,8 @@ Milestone 3: Real-space Features and Cube Artifacts
 
 import time
 import multiprocessing
+import hashlib
+import json
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 import tempfile
@@ -28,10 +30,21 @@ from pyscf.dft import numint
 
 # 物理常数
 BOHR_TO_ANGSTROM = 0.52917720859  # Bohr -> Å
+REALSPACE_DEFINITION_VERSION = "2.0.0"
+COORD_QUANTIZATION_DECIMALS = 6
+VALUE_QUANTIZATION_DECIMALS = 8
 
 # 默认配置
 DEFAULT_CUBE_CONFIG = {
     "enable_cube_generation": True,
+    "enable_cache": True,
+    "cache_directory": ".realspace_cache",
+    "realspace_core_features_enabled": True,
+    "realspace_core_features_expected": True,
+    "realspace_extended_features_enabled": True,
+    "realspace_extended_features_expected": True,
+    "required_artifacts": ["density"],
+    "optional_artifacts": ["esp", "homo", "lumo"],
     "grid_resolution_angstrom": 0.2,  # Å
     "margin_angstrom": 4.0,  # Å
     "max_atoms_for_cube": 50,
@@ -79,6 +92,12 @@ class RealspaceFeatureExtractor:
         start_time = time.time()
         
         result = self._init_realspace_features_skeleton()
+        compatibility = self._build_compatibility_keys(mol, mf)
+        result["metadata"]["geometry_electronic_state_key"] = compatibility["geometry_electronic_state_key"]
+        result["metadata"]["wavefunction_signature"] = compatibility["wavefunction_signature"]
+        result["metadata"]["feature_compatibility_key"] = compatibility["feature_compatibility_key"]
+        result["metadata"]["artifact_compatibility_key"] = compatibility["artifact_compatibility_key"]
+        result["metadata"]["cache_root"] = str(self._cache_root(output_dir))
         
         # Step 1: 检查是否应该跳过
         should_skip, reason = self._should_skip_cube(mol)
@@ -87,15 +106,33 @@ class RealspaceFeatureExtractor:
             result["metadata"]["failure_reason"] = reason
             logger.warning(f"Cube generation skipped for {molecule_id}: {reason}")
             return result
+
+        # Step 1.5: 缓存复用
+        cache_mode, cached_result, cached_artifacts = self._try_reuse_cache(
+            compatibility=compatibility,
+            molecule_id=molecule_id,
+            mol=mol,
+            output_dir=output_dir,
+        )
+        if cache_mode == "exact_feature_reuse" and cached_result is not None:
+            # exact feature reuse: 直接返回完整特征
+            cached_result["metadata"]["cache_reuse_mode"] = "exact_feature_reuse"
+            cached_result["metadata"]["cache_hit"] = True
+            return cached_result
         
         # M5: 使用子进程执行 cube 生成以实现可靠超时
         if timeout_seconds is not None and timeout_seconds > 0:
             return self._extract_with_timeout(
-                mol, mf, molecule_id, output_dir, timeout_seconds, start_time, result
+                mol, mf, molecule_id, output_dir, timeout_seconds, start_time, result, compatibility, cache_mode, cached_artifacts
             )
         
         # 无超时：直接执行
-        return self._extract_cubes(mol, mf, molecule_id, output_dir, result, start_time)
+        return self._extract_cubes(
+            mol, mf, molecule_id, output_dir, result, start_time,
+            compatibility=compatibility,
+            cache_mode=cache_mode,
+            reused_artifacts=cached_artifacts
+        )
     
     def _extract_with_timeout(
         self,
@@ -106,6 +143,9 @@ class RealspaceFeatureExtractor:
         timeout_seconds: float,
         start_time: float,
         result: Dict[str, Any],
+        compatibility: Dict[str, Any],
+        cache_mode: str,
+        reused_artifacts: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """使用子进程执行 cube 生成，带超时控制"""
         from multiprocessing import Process, Queue
@@ -113,7 +153,7 @@ class RealspaceFeatureExtractor:
         queue = Queue()
         
         # 序列化必要的数据
-        def target(queue, mol_dict, mf_dict, molecule_id, output_dir, config):
+        def target(queue, mol_dict, mf_dict, molecule_id, output_dir, config, compatibility, cache_mode, reused_artifacts):
             """子进程目标函数"""
             try:
                 # 重建 mol 和 mf
@@ -131,9 +171,14 @@ class RealspaceFeatureExtractor:
                 
                 # 创建临时 extractor
                 extractor = RealspaceFeatureExtractor(config)
-                result = extractor._extract_cubes(mol, mf, molecule_id, output_dir, 
-                                                   extractor._init_realspace_features_skeleton(),
-                                                   time.time())
+                result = extractor._extract_cubes(
+                    mol, mf, molecule_id, output_dir,
+                    extractor._init_realspace_features_skeleton(),
+                    time.time(),
+                    compatibility=compatibility,
+                    cache_mode=cache_mode,
+                    reused_artifacts=reused_artifacts
+                )
                 queue.put(('success', result))
             except Exception as e:
                 queue.put(('error', str(e)))
@@ -156,7 +201,7 @@ class RealspaceFeatureExtractor:
         # 启动子进程
         process = Process(
             target=target,
-            args=(queue, mol_dict, mf_dict, molecule_id, output_dir, self.config)
+            args=(queue, mol_dict, mf_dict, molecule_id, output_dir, self.config, compatibility, cache_mode, reused_artifacts)
         )
         process.start()
         process.join(timeout=timeout_seconds)
@@ -167,6 +212,9 @@ class RealspaceFeatureExtractor:
             process.join()
             result["metadata"]["extraction_status"] = "timeout"
             result["metadata"]["failure_reason"] = "realspace_timeout"
+            result["metadata"]["realspace_extended_failure_reason"] = "realspace_timeout"
+            result["metadata"]["cache_reuse_mode"] = cache_mode
+            result["metadata"]["cache_hit"] = cache_mode in ("exact_feature_reuse", "artifact_reuse")
             result["metadata"]["extraction_time_seconds"] = timeout_seconds
             logger.warning(f"[{molecule_id}] Realspace extraction timeout after {timeout_seconds}s")
             return result
@@ -180,16 +228,26 @@ class RealspaceFeatureExtractor:
                 logger.error(f"[{molecule_id}] Subprocess error: {data}")
                 # M5.5: 子进程失败时回退到直接执行
                 logger.warning(f"[{molecule_id}] Falling back to direct execution (no timeout)")
-                return self._extract_cubes(mol, mf, molecule_id, output_dir, 
-                                          self._init_realspace_features_skeleton(), 
-                                          time.time())
+                return self._extract_cubes(
+                    mol, mf, molecule_id, output_dir,
+                    self._init_realspace_features_skeleton(),
+                    time.time(),
+                    compatibility=compatibility,
+                    cache_mode=cache_mode,
+                    reused_artifacts=reused_artifacts
+                )
         except Exception as e:
             logger.error(f"[{molecule_id}] Queue communication error: {e}")
             # 回退到直接执行
             logger.warning(f"[{molecule_id}] Falling back to direct execution (no timeout)")
-            return self._extract_cubes(mol, mf, molecule_id, output_dir,
-                                      self._init_realspace_features_skeleton(),
-                                      time.time())
+            return self._extract_cubes(
+                mol, mf, molecule_id, output_dir,
+                self._init_realspace_features_skeleton(),
+                time.time(),
+                compatibility=compatibility,
+                cache_mode=cache_mode,
+                reused_artifacts=reused_artifacts
+            )
     
     def _extract_cubes(
         self,
@@ -199,6 +257,9 @@ class RealspaceFeatureExtractor:
         output_dir: Optional[str],
         result: Dict[str, Any],
         start_time: float,
+        compatibility: Optional[Dict[str, Any]] = None,
+        cache_mode: str = "no_reuse",
+        reused_artifacts: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """实际的 cube 生成逻辑（在子进程或主进程中执行）"""
         try:
@@ -207,6 +268,16 @@ class RealspaceFeatureExtractor:
                 output_dir = self.config["output_directory"]
             cube_dir = Path(output_dir) / molecule_id
             cube_dir.mkdir(parents=True, exist_ok=True)
+
+            if compatibility:
+                result["metadata"]["geometry_electronic_state_key"] = compatibility.get("geometry_electronic_state_key")
+                result["metadata"]["wavefunction_signature"] = compatibility.get("wavefunction_signature")
+                result["metadata"]["feature_compatibility_key"] = compatibility.get("feature_compatibility_key")
+                result["metadata"]["artifact_compatibility_key"] = compatibility.get("artifact_compatibility_key")
+            result["metadata"]["cache_reuse_mode"] = cache_mode
+            result["metadata"]["cache_hit"] = cache_mode in ("exact_feature_reuse", "artifact_reuse")
+            if isinstance(reused_artifacts, dict):
+                result["metadata"]["cache_entry_id"] = reused_artifacts.get("_cache_entry_id")
             
             # 计算网格参数（Å-based，然后转 Bohr）
             grid_shape = self._compute_grid_shape(mol)
@@ -216,140 +287,226 @@ class RealspaceFeatureExtractor:
             res_bohr = self.config["grid_resolution_angstrom"] / BOHR_TO_ANGSTROM
             margin_bohr = self.config["margin_angstrom"] / BOHR_TO_ANGSTROM
             
-            # Step 2: 生成 Density Cube
-            logger.debug(f"[{molecule_id}] Generating density cube...")
-            density_path = cube_dir / "density.cube"
+            required_artifacts = set(self.config.get("required_artifacts", []))
+            optional_artifacts = set(self.config.get("optional_artifacts", []))
+            density_required = (
+                "density" in required_artifacts
+                or "density" in optional_artifacts
+                or "esp" in required_artifacts
+                or "homo" in required_artifacts
+                or "lumo" in required_artifacts
+                or "esp" in optional_artifacts
+                or "homo" in optional_artifacts
+                or "lumo" in optional_artifacts
+            )
+            esp_requested = "esp" in required_artifacts or "esp" in optional_artifacts
+            homo_requested = "homo" in required_artifacts or "homo" in optional_artifacts
+            lumo_requested = "lumo" in required_artifacts or "lumo" in optional_artifacts
+
+            core_enabled = bool(self.config.get("realspace_core_features_enabled", True))
+            core_expected = bool(self.config.get("realspace_core_features_expected", core_enabled))
+            ext_enabled = bool(self.config.get("realspace_extended_features_enabled", True))
+            ext_expected = bool(self.config.get("realspace_extended_features_expected", ext_enabled))
+            result["metadata"]["realspace_core_features_enabled"] = core_enabled
+            result["metadata"]["realspace_core_features_expected"] = core_expected
+            result["metadata"]["realspace_extended_features_enabled"] = ext_enabled
+            result["metadata"]["realspace_extended_features_expected"] = ext_expected
+
             dm = mf.make_rdm1()
-            
-            # 使用 cubegen.density 生成标准 cube
-            cubegen.density(
-                mol, 
-                str(density_path), 
-                dm,
-                nx=int(grid_shape[0]),
-                ny=int(grid_shape[1]),
-                nz=int(grid_shape[2]),
-                resolution=res_bohr,
-                margin=margin_bohr
-            )
-            
-            result["artifacts"]["cube_files"]["density"] = {
-                "path": str(density_path),
-                "file_type": "gaussian_cube",
-                "value_type": "electron_density",
-                "value_unit": "e/bohr^3",
-                "grid_shape": grid_shape.tolist(),
-                "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
-                "origin_angstrom": self._get_cube_origin_angstrom(mol, margin_bohr),
-                "native_grid_unit": "bohr",
-                "source_method": "pyscf.tools.cubegen.density"
-            }
-            
-            # Step 3: 生成 MEP Cube
-            logger.debug(f"[{molecule_id}] Generating MEP cube...")
-            mep_path = cube_dir / "mep.cube"
-            cubegen.mep(
-                mol,
-                str(mep_path),
-                dm,
-                nx=int(grid_shape[0]),
-                ny=int(grid_shape[1]),
-                nz=int(grid_shape[2]),
-                resolution=res_bohr,
-                margin=margin_bohr
-            )
-            
-            result["artifacts"]["cube_files"]["esp"] = {
-                "path": str(mep_path),
-                "file_type": "gaussian_cube",
-                "value_type": "electrostatic_potential",
-                "value_unit": "hartree",
-                "grid_shape": grid_shape.tolist(),
-                "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
-                "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
-                "native_grid_unit": "bohr",
-                "source_method": "pyscf.tools.cubegen.mep"
-            }
-            
-            # Step 4: 生成 HOMO/LUMO Cubes
+
+            # Step 2: Density Cube（required artifact）
+            density_path = cube_dir / "density.cube"
+            reused_density = self._pick_reused_artifact(reused_artifacts, "density")
+            if density_required and reused_density:
+                logger.debug(f"[{molecule_id}] Reusing density cube artifact")
+                result["artifacts"]["cube_files"]["density"] = reused_density
+            elif density_required:
+                logger.debug(f"[{molecule_id}] Generating density cube...")
+                cubegen.density(
+                    mol, 
+                    str(density_path), 
+                    dm,
+                    nx=int(grid_shape[0]),
+                    ny=int(grid_shape[1]),
+                    nz=int(grid_shape[2]),
+                    resolution=res_bohr,
+                    margin=margin_bohr
+                )
+                
+                result["artifacts"]["cube_files"]["density"] = {
+                    "path": str(density_path),
+                    "file_type": "gaussian_cube",
+                    "value_type": "electron_density",
+                    "value_unit": "e/bohr^3",
+                    "grid_shape": grid_shape.tolist(),
+                    "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
+                    "origin_angstrom": self._get_cube_origin_angstrom(mol, margin_bohr),
+                    "native_grid_unit": "bohr",
+                    "source_method": "pyscf.tools.cubegen.density"
+                }
+
+            # Step 3: ESP cube（optional artifact）
+            if esp_requested:
+                reused_esp = self._pick_reused_artifact(reused_artifacts, "esp")
+                if reused_esp:
+                    logger.debug(f"[{molecule_id}] Reusing ESP cube artifact")
+                    result["artifacts"]["cube_files"]["esp"] = reused_esp
+                else:
+                    logger.debug(f"[{molecule_id}] Generating MEP cube...")
+                    mep_path = cube_dir / "mep.cube"
+                    cubegen.mep(
+                        mol,
+                        str(mep_path),
+                        dm,
+                        nx=int(grid_shape[0]),
+                        ny=int(grid_shape[1]),
+                        nz=int(grid_shape[2]),
+                        resolution=res_bohr,
+                        margin=margin_bohr
+                    )
+                    
+                    result["artifacts"]["cube_files"]["esp"] = {
+                        "path": str(mep_path),
+                        "file_type": "gaussian_cube",
+                        "value_type": "electrostatic_potential",
+                        "value_unit": "hartree",
+                        "grid_shape": grid_shape.tolist(),
+                        "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
+                        "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
+                        "native_grid_unit": "bohr",
+                        "source_method": "pyscf.tools.cubegen.mep"
+                    }
+
+            # Step 4: HOMO/LUMO cubes（optional artifacts）
             occ_idx = mf.mo_occ > 0
             n_occ = np.sum(occ_idx)
             homo_idx = n_occ - 1
             lumo_idx = n_occ
             
             # HOMO
-            if homo_idx >= 0 and homo_idx < mf.mo_coeff.shape[1]:
-                logger.debug(f"[{molecule_id}] Generating HOMO cube (MO {homo_idx})...")
-                homo_path = cube_dir / "homo.cube"
-                cubegen.orbital(
-                    mol,
-                    str(homo_path),
-                    mf.mo_coeff[:, homo_idx],
-                    nx=int(grid_shape[0]),
-                    ny=int(grid_shape[1]),
-                    nz=int(grid_shape[2]),
-                    resolution=res_bohr,
-                    margin=margin_bohr
-                )
-                
-                result["artifacts"]["cube_files"]["homo"] = {
-                    "path": str(homo_path),
-                    "file_type": "gaussian_cube",
-                    "value_type": "molecular_orbital_amplitude",
-                    "value_unit": "dimensionless",
-                    "orbital_index": int(homo_idx),
-                    "orbital_type": "HOMO",
-                    "orbital_energy_hartree": float(mf.mo_energy[homo_idx]) if hasattr(mf, 'mo_energy') else None,
-                    "grid_shape": grid_shape.tolist(),
-                    "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
-                    "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
-                    "native_grid_unit": "bohr",
-                    "source_method": "pyscf.tools.cubegen.orbital"
-                }
+            if homo_requested and homo_idx >= 0 and homo_idx < mf.mo_coeff.shape[1]:
+                reused_homo = self._pick_reused_artifact(reused_artifacts, "homo")
+                if reused_homo:
+                    logger.debug(f"[{molecule_id}] Reusing HOMO cube artifact")
+                    result["artifacts"]["cube_files"]["homo"] = reused_homo
+                else:
+                    logger.debug(f"[{molecule_id}] Generating HOMO cube (MO {homo_idx})...")
+                    homo_path = cube_dir / "homo.cube"
+                    cubegen.orbital(
+                        mol,
+                        str(homo_path),
+                        mf.mo_coeff[:, homo_idx],
+                        nx=int(grid_shape[0]),
+                        ny=int(grid_shape[1]),
+                        nz=int(grid_shape[2]),
+                        resolution=res_bohr,
+                        margin=margin_bohr
+                    )
+                    
+                    result["artifacts"]["cube_files"]["homo"] = {
+                        "path": str(homo_path),
+                        "file_type": "gaussian_cube",
+                        "value_type": "molecular_orbital_amplitude",
+                        "value_unit": "dimensionless",
+                        "orbital_index": int(homo_idx),
+                        "orbital_type": "HOMO",
+                        "orbital_energy_hartree": float(mf.mo_energy[homo_idx]) if hasattr(mf, 'mo_energy') else None,
+                        "grid_shape": grid_shape.tolist(),
+                        "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
+                        "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
+                        "native_grid_unit": "bohr",
+                        "source_method": "pyscf.tools.cubegen.orbital"
+                    }
             
             # LUMO
-            if lumo_idx < mf.mo_coeff.shape[1]:
-                logger.debug(f"[{molecule_id}] Generating LUMO cube (MO {lumo_idx})...")
-                lumo_path = cube_dir / "lumo.cube"
-                cubegen.orbital(
-                    mol,
-                    str(lumo_path),
-                    mf.mo_coeff[:, lumo_idx],
-                    nx=int(grid_shape[0]),
-                    ny=int(grid_shape[1]),
-                    nz=int(grid_shape[2]),
-                    resolution=res_bohr,
-                    margin=margin_bohr
-                )
-                
-                result["artifacts"]["cube_files"]["lumo"] = {
-                    "path": str(lumo_path),
-                    "file_type": "gaussian_cube",
-                    "value_type": "molecular_orbital_amplitude",
-                    "value_unit": "dimensionless",
-                    "orbital_index": int(lumo_idx),
-                    "orbital_type": "LUMO",
-                    "orbital_energy_hartree": float(mf.mo_energy[lumo_idx]) if hasattr(mf, 'mo_energy') else None,
-                    "grid_shape": grid_shape.tolist(),
-                    "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
-                    "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
-                    "native_grid_unit": "bohr",
-                    "source_method": "pyscf.tools.cubegen.orbital"
-                }
+            if lumo_requested and lumo_idx < mf.mo_coeff.shape[1]:
+                reused_lumo = self._pick_reused_artifact(reused_artifacts, "lumo")
+                if reused_lumo:
+                    logger.debug(f"[{molecule_id}] Reusing LUMO cube artifact")
+                    result["artifacts"]["cube_files"]["lumo"] = reused_lumo
+                else:
+                    logger.debug(f"[{molecule_id}] Generating LUMO cube (MO {lumo_idx})...")
+                    lumo_path = cube_dir / "lumo.cube"
+                    cubegen.orbital(
+                        mol,
+                        str(lumo_path),
+                        mf.mo_coeff[:, lumo_idx],
+                        nx=int(grid_shape[0]),
+                        ny=int(grid_shape[1]),
+                        nz=int(grid_shape[2]),
+                        resolution=res_bohr,
+                        margin=margin_bohr
+                    )
+                    
+                    result["artifacts"]["cube_files"]["lumo"] = {
+                        "path": str(lumo_path),
+                        "file_type": "gaussian_cube",
+                        "value_type": "molecular_orbital_amplitude",
+                        "value_unit": "dimensionless",
+                        "orbital_index": int(lumo_idx),
+                        "orbital_type": "LUMO",
+                        "orbital_energy_hartree": float(mf.mo_energy[lumo_idx]) if hasattr(mf, 'mo_energy') else None,
+                        "grid_shape": grid_shape.tolist(),
+                        "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
+                        "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
+                        "native_grid_unit": "bohr",
+                        "source_method": "pyscf.tools.cubegen.orbital"
+                    }
             
             # Step 5: 从 grid 计算 shape 特征（更精确，不用读 cube 文件）
             logger.debug(f"[{molecule_id}] Computing shape features from grid...")
-            self._compute_shape_features_from_grid(mol, mf, result, grid_shape, res_bohr, margin_bohr)
+            self._compute_shape_features_from_grid(
+                mol, mf, result, grid_shape, res_bohr, margin_bohr,
+                core_enabled=core_enabled,
+                extended_enabled=ext_enabled
+            )
             
-            # 验证
-            if self._validate_realspace_features(result):
+            core_success = (
+                (not core_enabled)
+                or (
+                    result.get("density_isosurface_volume") is not None
+                    and result.get("density_isosurface_area") is not None
+                    and result.get("density_sphericity_like") is not None
+                )
+            )
+            ext_success = (
+                (not ext_enabled)
+                or (
+                    result.get("esp_extrema_summary") is not None
+                    and result.get("orbital_extent_homo") is not None
+                    and result.get("orbital_extent_lumo") is not None
+                )
+            )
+            result["metadata"]["realspace_core_features_status"] = "success" if core_success else "failed"
+            if not ext_enabled:
+                result["metadata"]["realspace_extended_features_status"] = "disabled"
+            else:
+                result["metadata"]["realspace_extended_features_status"] = "success" if ext_success else "failed"
+
+            # 验证 + tier-aware 状态判定
+            if not self._validate_realspace_features(result):
+                result["metadata"]["extraction_status"] = "failed"
+                result["metadata"]["failure_reason"] = "validation_failed"
+            elif core_expected and not core_success:
+                result["metadata"]["extraction_status"] = "failed"
+                result["metadata"]["failure_reason"] = "realspace_core_failed"
+            elif ext_expected and not ext_success:
+                result["metadata"]["extraction_status"] = "failed"
+                result["metadata"]["failure_reason"] = "realspace_extended_failed"
+                result["metadata"]["realspace_extended_failure_reason"] = "realspace_extended_failed"
+            else:
                 result["metadata"]["extraction_status"] = "success"
                 elapsed = time.time() - start_time
                 result["metadata"]["extraction_time_seconds"] = elapsed
                 logger.info(f"[{molecule_id}] Realspace features extracted in {elapsed:.3f}s")
-            else:
-                result["metadata"]["extraction_status"] = "failed"
-                result["metadata"]["failure_reason"] = "validation_failed"
+
+            # 成功或可用结果写入缓存（避免缓存失败态）
+            if result["metadata"]["extraction_status"] == "success":
+                self._save_cache_entries(
+                    compatibility=compatibility,
+                    output_dir=output_dir,
+                    result=result,
+                )
                 
         except Exception as e:
             result["metadata"]["extraction_status"] = "failed"
@@ -378,6 +535,7 @@ class RealspaceFeatureExtractor:
                 }
             },
             "metadata": {
+                "realspace_definition_version": REALSPACE_DEFINITION_VERSION,
                 "native_grid_unit": "bohr",
                 "output_unit": "angstrom",
                 "conversion_factor_bohr_to_angstrom": BOHR_TO_ANGSTROM,
@@ -385,6 +543,23 @@ class RealspaceFeatureExtractor:
                 "orbital_isovalue": self.config["orbital_isovalue"],
                 "cube_grid_shape": None,
                 "cube_spacing_angstrom": None,
+                "geometry_electronic_state_key": None,
+                "wavefunction_signature": None,
+                "feature_compatibility_key": None,
+                "artifact_compatibility_key": None,
+                "cache_reuse_mode": "no_reuse",  # exact_feature_reuse | artifact_reuse | no_reuse
+                "cache_hit": False,
+                "cache_entry_id": None,
+                "cache_root": None,
+                "required_artifacts": list(self.config.get("required_artifacts", [])),
+                "optional_artifacts": list(self.config.get("optional_artifacts", [])),
+                "realspace_core_features_enabled": bool(self.config.get("realspace_core_features_enabled", True)),
+                "realspace_core_features_expected": bool(self.config.get("realspace_core_features_expected", True)),
+                "realspace_core_features_status": "not_started",
+                "realspace_extended_features_enabled": bool(self.config.get("realspace_extended_features_enabled", True)),
+                "realspace_extended_features_expected": bool(self.config.get("realspace_extended_features_expected", True)),
+                "realspace_extended_features_status": "not_started",
+                "realspace_extended_failure_reason": None,
                 "extraction_status": "not_attempted",
                 "failure_reason": None,
                 "extraction_time_seconds": None,
@@ -448,7 +623,9 @@ class RealspaceFeatureExtractor:
         result: Dict[str, Any],
         grid_shape: np.ndarray,
         res_bohr: float,
-        margin_bohr: float
+        margin_bohr: float,
+        core_enabled: bool = True,
+        extended_enabled: bool = True,
     ):
         """在规则网格上计算 shape 特征"""
         
@@ -473,75 +650,65 @@ class RealspaceFeatureExtractor:
         # Reshape 为 3D
         rho_3d = rho.reshape(grid_shape)
         
-        # === 1. Density isosurface volume ===
         threshold = self.config["density_isovalue"]
         mask = rho_3d > threshold
         n_inside = np.sum(mask)
-        volume_ang3 = n_inside * voxel_volume_ang3
-        
-        result["density_isosurface_volume"] = {
-            "value_angstrom3": float(volume_ang3),
-            "threshold": threshold,
-            "computation_method": "voxel_count_times_voxel_volume",
-            "n_voxels_inside": int(n_inside),
-            "voxel_volume_angstrom3": float(voxel_volume_ang3)
-        }
-        
-        # === 2. Density isosurface area (voxel-face approximation) ===
-        area_ang2 = self._compute_voxel_face_area(mask, res_bohr)
-        
-        result["density_isosurface_area"] = {
-            "value_angstrom2": float(area_ang2),
-            "threshold": threshold,
-            "computation_method": "voxel_face_approximation",
-            "surface_area_is_approximate": True,
-            "approximation_note": "counts faces between inside/outside voxels, not marching cubes"
-        }
-        
-        # === 3. Density sphericity-like ===
-        if n_inside > 10:  # 需要足够点才能计算形状
-            sphericity = self._compute_sphericity(mask, coords.reshape(*grid_shape, 3))
-            result["density_sphericity_like"] = {
-                "value": float(sphericity),
+
+        if core_enabled:
+            # === 1. Density isosurface volume ===
+            volume_ang3 = n_inside * voxel_volume_ang3
+            result["density_isosurface_volume"] = {
+                "value_angstrom3": float(volume_ang3),
                 "threshold": threshold,
-                "formula": "s = 3 * lambda3 / (lambda1 + lambda2 + lambda3)",
-                "range": "[0, 1], 1=perfect_sphere, 0=line",
-                "description": "based on covariance matrix eigenvalues of density mask"
+                "computation_method": "voxel_count_times_voxel_volume",
+                "n_voxels_inside": int(n_inside),
+                "voxel_volume_angstrom3": float(voxel_volume_ang3)
             }
-        
-        # === 4. ESP extrema summary ===
-        # 计算 ESP
-        from pyscf.solvent import ddcosmo
-        # ESP = V_nuc + V_ele
-        # 简化为只计算电子部分 + 核部分的近似
-        
-        # 使用 pyscf 的 MEP 计算
-        # 注意：MEP 计算比较耗时，这里用简化版本
-        try:
-            # 尝试从已生成的 cube 读取或使用简化计算
-            # 这里使用点电荷近似
-            esp = self._compute_esp_on_grid(mol, coords, dm)
-            esp_3d = esp.reshape(grid_shape)
             
-            result["esp_extrema_summary"] = {
-                "min_hartree": float(np.min(esp)),
-                "max_hartree": float(np.max(esp)),
-                "mean_hartree": float(np.mean(esp)),
-                "std_hartree": float(np.std(esp)),
-                "computed_over": "full_cube_grid",
-                "n_voxels_total": n_total
+            # === 2. Density isosurface area (voxel-face approximation) ===
+            area_ang2 = self._compute_voxel_face_area(mask, res_bohr)
+            result["density_isosurface_area"] = {
+                "value_angstrom2": float(area_ang2),
+                "threshold": threshold,
+                "computation_method": "voxel_face_approximation",
+                "surface_area_is_approximate": True,
+                "approximation_note": "counts faces between inside/outside voxels, not marching cubes"
             }
-        except Exception as e:
-            logger.warning(f"ESP computation failed: {e}")
-            result["esp_extrema_summary"] = None
-        
-        # === 5. Orbital extent (HOMO/LUMO) ===
+            
+            # === 3. Density sphericity-like ===
+            if n_inside > 10:  # 需要足够点才能计算形状
+                sphericity = self._compute_sphericity(mask, coords.reshape(*grid_shape, 3))
+                result["density_sphericity_like"] = {
+                    "value": float(sphericity),
+                    "threshold": threshold,
+                    "formula": "s = 3 * lambda3 / (lambda1 + lambda2 + lambda3)",
+                    "range": "[0, 1], 1=perfect_sphere, 0=line",
+                    "description": "based on covariance matrix eigenvalues of density mask"
+                }
+
+        # === 4-5. Extended features ===
+        if extended_enabled:
+            try:
+                esp = self._compute_esp_on_grid(mol, coords, dm)
+                result["esp_extrema_summary"] = {
+                    "min_hartree": float(np.min(esp)),
+                    "max_hartree": float(np.max(esp)),
+                    "mean_hartree": float(np.mean(esp)),
+                    "std_hartree": float(np.std(esp)),
+                    "computed_over": "full_cube_grid",
+                    "n_voxels_total": n_total
+                }
+            except Exception as e:
+                logger.warning(f"ESP computation failed: {e}")
+                result["esp_extrema_summary"] = None
+
+        # Orbital extent (HOMO/LUMO)
         occ_idx = mf.mo_occ > 0
         n_occ = np.sum(occ_idx)
         
         # HOMO
         homo_idx = n_occ - 1
-        if homo_idx >= 0:
+        if extended_enabled and homo_idx >= 0:
             extent = self._compute_orbital_extent(
                 mol, coords, mf.mo_coeff[:, homo_idx], grid_shape
             )
@@ -557,7 +724,7 @@ class RealspaceFeatureExtractor:
         
         # LUMO
         lumo_idx = n_occ
-        if lumo_idx < mf.mo_coeff.shape[1]:
+        if extended_enabled and lumo_idx < mf.mo_coeff.shape[1]:
             extent = self._compute_orbital_extent(
                 mol, coords, mf.mo_coeff[:, lumo_idx], grid_shape
             )
@@ -795,6 +962,214 @@ class RealspaceFeatureExtractor:
         except Exception as e:
             logger.error(f"Validation error: {e}")
             return False
+
+    # ===== Cache / Fingerprint =====
+    def _stable_hash(self, obj: Any) -> str:
+        payload = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _json_default(obj: Any):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    def _cache_root(self, output_dir: Optional[str]) -> Path:
+        if output_dir:
+            base = Path(output_dir).resolve().parent
+        else:
+            base = Path(".").resolve()
+        return base / self.config.get("cache_directory", ".realspace_cache")
+
+    def _build_geometry_electronic_state_key(self, mol: gto.Mole) -> str:
+        coords = np.round(mol.atom_coords(unit="A"), COORD_QUANTIZATION_DECIMALS).tolist()
+        symbols = [mol.atom_symbol(i) for i in range(mol.natm)]
+        payload = {
+            "atom_symbols": symbols,
+            "atom_coords_angstrom_q": coords,
+            "natm": int(mol.natm),
+            "charge": int(mol.charge),
+            "spin": int(mol.spin),
+            "multiplicity": int(mol.spin + 1),
+            "basis": str(mol.basis),
+        }
+        return self._stable_hash(payload)
+
+    def _build_wavefunction_signature(self, mf: scf.hf.SCF) -> str:
+        mo_occ_q = np.round(np.array(mf.mo_occ).astype(float), VALUE_QUANTIZATION_DECIMALS).tolist()
+        mo_energy_q = np.round(np.array(mf.mo_energy).astype(float), VALUE_QUANTIZATION_DECIMALS).tolist()
+        payload = {
+            "mo_coeff_shape": list(np.array(mf.mo_coeff).shape),
+            "mo_occ_hash": self._stable_hash(mo_occ_q),
+            "mo_energy_hash": self._stable_hash(mo_energy_q),
+            "e_tot_q": round(float(mf.e_tot), VALUE_QUANTIZATION_DECIMALS),
+            "scf_converged": bool(getattr(mf, "converged", False)),
+        }
+        return self._stable_hash(payload)
+
+    def _build_compatibility_keys(self, mol: gto.Mole, mf: scf.hf.SCF) -> Dict[str, str]:
+        geo_key = self._build_geometry_electronic_state_key(mol)
+        wf_sig = self._build_wavefunction_signature(mf)
+        artifact_payload = {
+            "geo_key": geo_key,
+            "wf_sig": wf_sig,
+            "grid_resolution_angstrom": float(self.config["grid_resolution_angstrom"]),
+            "margin_angstrom": float(self.config["margin_angstrom"]),
+            "max_total_grid_points": int(self.config["max_total_grid_points"]),
+            "realspace_definition_version": REALSPACE_DEFINITION_VERSION,
+        }
+        feature_payload = {
+            **artifact_payload,
+            "density_isovalue": float(self.config["density_isovalue"]),
+            "orbital_isovalue": float(self.config["orbital_isovalue"]),
+            "core_enabled": bool(self.config.get("realspace_core_features_enabled", True)),
+            "extended_enabled": bool(self.config.get("realspace_extended_features_enabled", True)),
+        }
+        return {
+            "geometry_electronic_state_key": geo_key,
+            "wavefunction_signature": wf_sig,
+            "artifact_compatibility_key": self._stable_hash(artifact_payload),
+            "feature_compatibility_key": self._stable_hash(feature_payload),
+        }
+
+    def _compute_grid_signature(self, mol: gto.Mole) -> Dict[str, Any]:
+        grid_shape = self._compute_grid_shape(mol).tolist()
+        spacing = [round(float(self.config["grid_resolution_angstrom"]), COORD_QUANTIZATION_DECIMALS)] * 3
+        margin_bohr = self.config["margin_angstrom"] / BOHR_TO_ANGSTROM
+        origin = [round(float(v), COORD_QUANTIZATION_DECIMALS) for v in self._get_cube_origin_angstrom(mol, margin_bohr)]
+        return {
+            "shape": grid_shape,
+            "spacing_angstrom": spacing,
+            "origin_angstrom": origin,
+            "realspace_definition_version": REALSPACE_DEFINITION_VERSION,
+        }
+
+    def _pick_reused_artifact(self, reused_artifacts: Optional[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(reused_artifacts, dict):
+            return None
+        info = reused_artifacts.get(key)
+        if not isinstance(info, dict):
+            return None
+        p = info.get("path")
+        if not p or not Path(p).exists():
+            return None
+        return info
+
+    def _try_reuse_cache(
+        self,
+        compatibility: Dict[str, str],
+        molecule_id: str,
+        mol: gto.Mole,
+        output_dir: Optional[str],
+    ) -> Tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        if not bool(self.config.get("enable_cache", True)):
+            return "no_reuse", None, None
+
+        root = self._cache_root(output_dir)
+        features_dir = root / "features"
+        artifacts_dir = root / "artifacts"
+        feature_file = features_dir / f"{compatibility['feature_compatibility_key']}.json"
+        artifact_file = artifacts_dir / f"{compatibility['artifact_compatibility_key']}.json"
+        expected_grid = self._compute_grid_signature(mol)
+
+        if feature_file.exists():
+            try:
+                entry = json.loads(feature_file.read_text(encoding="utf-8"))
+                if entry.get("feature_compatibility_key") == compatibility["feature_compatibility_key"]:
+                    result = entry.get("result")
+                    if isinstance(result, dict):
+                        result.setdefault("metadata", {})
+                        result["metadata"]["cache_reuse_mode"] = "exact_feature_reuse"
+                        result["metadata"]["cache_hit"] = True
+                        result["metadata"]["cache_entry_id"] = entry.get("entry_id")
+                        return "exact_feature_reuse", result, None
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] feature cache read failed: {e}")
+
+        if artifact_file.exists():
+            try:
+                entry = json.loads(artifact_file.read_text(encoding="utf-8"))
+                if entry.get("artifact_compatibility_key") != compatibility["artifact_compatibility_key"]:
+                    return "no_reuse", None, None
+                if entry.get("grid_signature") != expected_grid:
+                    return "no_reuse", None, None
+                if entry.get("realspace_definition_version") != REALSPACE_DEFINITION_VERSION:
+                    return "no_reuse", None, None
+                artifacts = entry.get("artifacts")
+                if not isinstance(artifacts, dict):
+                    return "no_reuse", None, None
+                # 仅当 required artifacts 都存在且可读时才 artifact_reuse
+                required = set(self.config.get("required_artifacts", []))
+                for rk in required:
+                    info = artifacts.get(rk)
+                    if not isinstance(info, dict) or not info.get("path") or not Path(info["path"]).exists():
+                        return "no_reuse", None, None
+                artifacts["_cache_entry_id"] = entry.get("entry_id")
+                return "artifact_reuse", None, artifacts
+            except Exception as e:
+                logger.warning(f"[{molecule_id}] artifact cache read failed: {e}")
+
+        return "no_reuse", None, None
+
+    def _save_cache_entries(
+        self,
+        compatibility: Optional[Dict[str, str]],
+        output_dir: Optional[str],
+        result: Dict[str, Any],
+    ):
+        if not compatibility or not bool(self.config.get("enable_cache", True)):
+            return
+
+        root = self._cache_root(output_dir)
+        features_dir = root / "features"
+        artifacts_dir = root / "artifacts"
+        features_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        entry_id = compatibility["feature_compatibility_key"][:16]
+        result.setdefault("metadata", {})
+        result["metadata"]["cache_entry_id"] = entry_id
+
+        feature_entry = {
+            "entry_id": entry_id,
+            "realspace_definition_version": REALSPACE_DEFINITION_VERSION,
+            "geometry_electronic_state_key": compatibility["geometry_electronic_state_key"],
+            "wavefunction_signature": compatibility["wavefunction_signature"],
+            "feature_compatibility_key": compatibility["feature_compatibility_key"],
+            "artifact_compatibility_key": compatibility["artifact_compatibility_key"],
+            "result": result,
+        }
+        (features_dir / f"{compatibility['feature_compatibility_key']}.json").write_text(
+            json.dumps(feature_entry, ensure_ascii=False, indent=2, default=self._json_default),
+            encoding="utf-8"
+        )
+
+        artifact_entry = {
+            "entry_id": compatibility["artifact_compatibility_key"][:16],
+            "realspace_definition_version": REALSPACE_DEFINITION_VERSION,
+            "geometry_electronic_state_key": compatibility["geometry_electronic_state_key"],
+            "wavefunction_signature": compatibility["wavefunction_signature"],
+            "artifact_compatibility_key": compatibility["artifact_compatibility_key"],
+            "grid_signature": {
+                "shape": result["metadata"].get("cube_grid_shape"),
+                "spacing_angstrom": result["metadata"].get("cube_spacing_angstrom"),
+                "origin_angstrom": (
+                    (result.get("artifacts", {}).get("cube_files", {}).get("density") or {}).get("origin_angstrom")
+                ),
+                "realspace_definition_version": REALSPACE_DEFINITION_VERSION,
+            },
+            "artifacts": result.get("artifacts", {}).get("cube_files", {}),
+        }
+        (artifacts_dir / f"{compatibility['artifact_compatibility_key']}.json").write_text(
+            json.dumps(artifact_entry, ensure_ascii=False, indent=2, default=self._json_default),
+            encoding="utf-8"
+        )
 
 
 def extract_realspace_features(
