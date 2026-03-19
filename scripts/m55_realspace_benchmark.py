@@ -183,19 +183,46 @@ def aggregate_profile(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     rs_failure_reasons = Counter()
 
     times = []
+    total_wall_times = []
     artifact_sizes = []
+    stage_values: Dict[str, List[float]] = defaultdict(list)
     for r in rows:
         if r["realspace_time_seconds"] is not None:
             times.append(float(r["realspace_time_seconds"]))
+        if r["total_wall_time_seconds"] is not None:
+            total_wall_times.append(float(r["total_wall_time_seconds"]))
         artifact_sizes.append(int(r["artifact_bytes"]))
         reason_counter.update(r["reason_codes"])
         if r["realspace_failure_reason"]:
             rs_failure_reasons.update([r["realspace_failure_reason"]])
         if r["overall_status"] == "core_success_partial_features":
             partial_source_counter.update(r["reason_codes"])
+        stage_map = r.get("realspace_stage_timing_seconds") or {}
+        if isinstance(stage_map, dict):
+            for k, v in stage_map.items():
+                if v is None:
+                    continue
+                try:
+                    stage_values[k].append(float(v))
+                except (TypeError, ValueError):
+                    continue
 
     success = rs_status_counter.get("success", 0)
     timeout = rs_status_counter.get("timeout", 0)
+    total_wall = float(sum(total_wall_times))
+    throughput = (n / total_wall * 3600.0) if total_wall > 1e-12 else 0.0
+    stage_summary: Dict[str, Dict[str, float]] = {}
+    for k, vals in stage_values.items():
+        if not vals:
+            continue
+        stage_summary[k] = {
+            "mean_seconds": round(float(statistics.mean(vals)), 6),
+            "p90_seconds": round(float(percentile(vals, 90)), 6),
+            "total_seconds": round(float(sum(vals)), 6),
+        }
+    bottleneck_stage = None
+    if stage_summary:
+        bottleneck_stage = max(stage_summary.items(), key=lambda kv: kv[1]["total_seconds"])[0]
 
     return {
         "n_molecules": n,
@@ -205,11 +232,16 @@ def aggregate_profile(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "overall_status_counts": dict(overall_counter),
         "mean_wall_time_seconds": round(statistics.mean(times), 3) if times else 0.0,
         "p90_wall_time_seconds": round(percentile(times, 90), 3) if times else 0.0,
+        "mean_total_wall_time_seconds": round(statistics.mean(total_wall_times), 3) if total_wall_times else 0.0,
+        "p90_total_wall_time_seconds": round(percentile(total_wall_times, 90), 3) if total_wall_times else 0.0,
+        "throughput_molecules_per_hour": round(throughput, 2),
         "mean_artifact_bytes": int(statistics.mean(artifact_sizes)) if artifact_sizes else 0,
         "total_artifact_bytes": int(sum(artifact_sizes)),
         "reason_code_histogram": dict(reason_counter),
         "realspace_failure_reason_histogram": dict(rs_failure_reasons),
         "partial_source_breakdown": dict(partial_source_counter),
+        "realspace_stage_timing_summary": stage_summary,
+        "realspace_stage_bottleneck": bottleneck_stage,
     }
 
 
@@ -369,6 +401,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
                         feat_name: get_nested(data, path)
                         for feat_name, path in DRIFT_FEATURE_PATHS.items()
                     },
+                    "realspace_stage_timing_seconds": real_meta.get("stage_timing_seconds"),
                 }
             )
 

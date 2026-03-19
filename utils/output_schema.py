@@ -242,6 +242,7 @@ class UnifiedOutputBuilder:
                     "realspace_extended_features_expected": None,
                     "realspace_extended_features_status": None,
                     "realspace_extended_failure_reason": None,
+                    "stage_timing_seconds": None,
                     "extraction_status": None,
                     "failure_reason": None,
                     "extraction_time_seconds": None,

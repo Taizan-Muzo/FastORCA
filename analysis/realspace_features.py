@@ -278,6 +278,10 @@ class RealspaceFeatureExtractor:
             result["metadata"]["cache_hit"] = cache_mode in ("exact_feature_reuse", "artifact_reuse")
             if isinstance(reused_artifacts, dict):
                 result["metadata"]["cache_entry_id"] = reused_artifacts.get("_cache_entry_id")
+            stage_timing = dict(result["metadata"].get("stage_timing_seconds") or {})
+            for k in ["density_cube", "esp_cube", "homo_cube", "lumo_cube", "shape_core", "shape_extended"]:
+                stage_timing.setdefault(k, 0.0)
+            result["metadata"]["stage_timing_seconds"] = stage_timing
             
             # 计算网格参数（Å-based，然后转 Bohr）
             grid_shape = self._compute_grid_shape(mol)
@@ -320,8 +324,10 @@ class RealspaceFeatureExtractor:
             if density_required and reused_density:
                 logger.debug(f"[{molecule_id}] Reusing density cube artifact")
                 result["artifacts"]["cube_files"]["density"] = reused_density
+                stage_timing["density_cube"] = 0.0
             elif density_required:
                 logger.debug(f"[{molecule_id}] Generating density cube...")
+                t_stage = time.time()
                 cubegen.density(
                     mol, 
                     str(density_path), 
@@ -344,6 +350,7 @@ class RealspaceFeatureExtractor:
                     "native_grid_unit": "bohr",
                     "source_method": "pyscf.tools.cubegen.density"
                 }
+                stage_timing["density_cube"] = float(time.time() - t_stage)
 
             # Step 3: ESP cube（optional artifact）
             if esp_requested:
@@ -351,9 +358,11 @@ class RealspaceFeatureExtractor:
                 if reused_esp:
                     logger.debug(f"[{molecule_id}] Reusing ESP cube artifact")
                     result["artifacts"]["cube_files"]["esp"] = reused_esp
+                    stage_timing["esp_cube"] = 0.0
                 else:
                     logger.debug(f"[{molecule_id}] Generating MEP cube...")
                     mep_path = cube_dir / "mep.cube"
+                    t_stage = time.time()
                     cubegen.mep(
                         mol,
                         str(mep_path),
@@ -376,6 +385,7 @@ class RealspaceFeatureExtractor:
                         "native_grid_unit": "bohr",
                         "source_method": "pyscf.tools.cubegen.mep"
                     }
+                    stage_timing["esp_cube"] = float(time.time() - t_stage)
 
             # Step 4: HOMO/LUMO cubes（optional artifacts）
             occ_idx = mf.mo_occ > 0
@@ -389,9 +399,11 @@ class RealspaceFeatureExtractor:
                 if reused_homo:
                     logger.debug(f"[{molecule_id}] Reusing HOMO cube artifact")
                     result["artifacts"]["cube_files"]["homo"] = reused_homo
+                    stage_timing["homo_cube"] = 0.0
                 else:
                     logger.debug(f"[{molecule_id}] Generating HOMO cube (MO {homo_idx})...")
                     homo_path = cube_dir / "homo.cube"
+                    t_stage = time.time()
                     cubegen.orbital(
                         mol,
                         str(homo_path),
@@ -417,6 +429,7 @@ class RealspaceFeatureExtractor:
                         "native_grid_unit": "bohr",
                         "source_method": "pyscf.tools.cubegen.orbital"
                     }
+                    stage_timing["homo_cube"] = float(time.time() - t_stage)
             
             # LUMO
             if lumo_requested and lumo_idx < mf.mo_coeff.shape[1]:
@@ -424,9 +437,11 @@ class RealspaceFeatureExtractor:
                 if reused_lumo:
                     logger.debug(f"[{molecule_id}] Reusing LUMO cube artifact")
                     result["artifacts"]["cube_files"]["lumo"] = reused_lumo
+                    stage_timing["lumo_cube"] = 0.0
                 else:
                     logger.debug(f"[{molecule_id}] Generating LUMO cube (MO {lumo_idx})...")
                     lumo_path = cube_dir / "lumo.cube"
+                    t_stage = time.time()
                     cubegen.orbital(
                         mol,
                         str(lumo_path),
@@ -452,14 +467,17 @@ class RealspaceFeatureExtractor:
                         "native_grid_unit": "bohr",
                         "source_method": "pyscf.tools.cubegen.orbital"
                     }
+                    stage_timing["lumo_cube"] = float(time.time() - t_stage)
             
             # Step 5: 从 grid 计算 shape 特征（更精确，不用读 cube 文件）
             logger.debug(f"[{molecule_id}] Computing shape features from grid...")
-            self._compute_shape_features_from_grid(
+            shape_timing = self._compute_shape_features_from_grid(
                 mol, mf, result, grid_shape, res_bohr, margin_bohr,
                 core_enabled=core_enabled,
                 extended_enabled=ext_enabled
             )
+            stage_timing["shape_core"] = float(shape_timing.get("shape_core", 0.0))
+            stage_timing["shape_extended"] = float(shape_timing.get("shape_extended", 0.0))
             
             core_success = (
                 (not core_enabled)
@@ -560,6 +578,14 @@ class RealspaceFeatureExtractor:
                 "realspace_extended_features_expected": bool(self.config.get("realspace_extended_features_expected", True)),
                 "realspace_extended_features_status": "not_started",
                 "realspace_extended_failure_reason": None,
+                "stage_timing_seconds": {
+                    "density_cube": 0.0,
+                    "esp_cube": 0.0,
+                    "homo_cube": 0.0,
+                    "lumo_cube": 0.0,
+                    "shape_core": 0.0,
+                    "shape_extended": 0.0,
+                },
                 "extraction_status": "not_attempted",
                 "failure_reason": None,
                 "extraction_time_seconds": None,
@@ -626,8 +652,9 @@ class RealspaceFeatureExtractor:
         margin_bohr: float,
         core_enabled: bool = True,
         extended_enabled: bool = True,
-    ):
+    ) -> Dict[str, float]:
         """在规则网格上计算 shape 特征"""
+        stage_timing = {"shape_core": 0.0, "shape_extended": 0.0}
         
         # 创建网格
         from pyscf.dft import gen_grid
@@ -655,6 +682,7 @@ class RealspaceFeatureExtractor:
         n_inside = np.sum(mask)
 
         if core_enabled:
+            t_core = time.time()
             # === 1. Density isosurface volume ===
             volume_ang3 = n_inside * voxel_volume_ang3
             result["density_isosurface_volume"] = {
@@ -685,9 +713,11 @@ class RealspaceFeatureExtractor:
                     "range": "[0, 1], 1=perfect_sphere, 0=line",
                     "description": "based on covariance matrix eigenvalues of density mask"
                 }
+            stage_timing["shape_core"] = float(time.time() - t_core)
 
         # === 4-5. Extended features ===
         if extended_enabled:
+            t_ext = time.time()
             try:
                 esp = self._compute_esp_on_grid(mol, coords, dm)
                 result["esp_extrema_summary"] = {
@@ -737,9 +767,12 @@ class RealspaceFeatureExtractor:
                     "orbital_type": "LUMO",
                     "orbital_energy_hartree": float(mf.mo_energy[lumo_idx]) if hasattr(mf, 'mo_energy') else None
                 }
+        if extended_enabled:
+            stage_timing["shape_extended"] = float(time.time() - t_ext)
         
         # 更新 metadata
         result["metadata"]["cube_spacing_angstrom"] = [self.config["grid_resolution_angstrom"]] * 3
+        return stage_timing
     
     def _generate_uniform_grid(
         self,
