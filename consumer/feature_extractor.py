@@ -1150,8 +1150,18 @@ class FeatureExtractor:
             
             # 设置 SCF 状态和几何优化状态（从 dft_config 显式设置）
             scf_converged = getattr(mf, 'converged', False)
-            geo_opt_success = dft_config.get("geometry_optimization", True) if dft_config else True
-            # 如果几何优化被禁用，视为成功；如果启用，假设成功（失败会在更早阶段捕获）
+            # 几何优化语义：
+            # - geometry_optimization=False 表示策略性不执行，不应判定 failed_geometry
+            # - geometry_optimization=True 但无显式失败标志时，默认视为成功
+            if dft_config:
+                geo_opt_enabled = bool(dft_config.get("geometry_optimization", True))
+                if not geo_opt_enabled:
+                    geo_opt_success = True
+                else:
+                    geo_opt_success = bool(dft_config.get("geometry_optimization_success", True))
+            else:
+                geo_opt_success = True
+
             builder.set_status(
                 scf_convergence_success=scf_converged,
                 geometry_optimization_success=geo_opt_success
