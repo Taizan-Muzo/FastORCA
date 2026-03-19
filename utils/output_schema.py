@@ -117,7 +117,7 @@ class UnifiedOutputBuilder:
                         "needs_exact_qcmol_name": True,  # LI abbreviation needs exact qcMol expansion
                     },
                     "ADCH_charges": {"mapped_path": "external_bridge_roadmap.atom_level.adch_charges", "status": "missing"},
-                    "NBO_LP": {"mapped_path": "external_bridge_roadmap.atom_level.nbo_lp", "status": "missing"},
+                    "NBO_LP": {"mapped_path": "atom_features.atomic_lone_pair_heuristic_proxy", "status": "implemented_proxy"},
                     "NPA": {"mapped_path": "atom_features.atomic_charge_iao_proxy", "status": "implemented_proxy"},
                     "NPA_exact": {"mapped_path": "external_bridge_roadmap.atom_level.npa_exact", "status": "missing"},
                 },
@@ -195,6 +195,25 @@ class UnifiedOutputBuilder:
                     "cm5": None,
                     "bader": None,
                 },
+                "atomic_lone_pair_heuristic_proxy": None,
+                "atomic_lone_pair_heuristic_proxy_metadata": {
+                    "is_heuristic": True,
+                    "equivalent_to_nbo_lp": False,
+                    "definition_version": "v1",
+                    "inputs_used": [
+                        "orbital_features.ibo_atom_contributions",
+                        "orbital_features.ibo_occupancies",
+                        "atom_features.atomic_charge_iao_proxy",
+                        "geometry.atom_symbols",
+                    ],
+                    "normalization_rule": "score = clamp(lp_base * (0.7 + 0.3*charge_boost) * element_gate, 0, 1), where charge_boost increases as atom gets more negative",
+                    "only_occupied_ibo_considered": True,
+                    "limitations": [
+                        "heuristic proxy only, not equivalent to NBO-LP",
+                        "closed-shell IBO extraction dependency",
+                        "transition-metal and strongly delocalized systems may be unreliable",
+                    ],
+                },
                 "atomic_orbital_descriptor_proxy_v1": {
                     "n_dominant_ibo": None,
                     "sum_ibo_occupancy": None,
@@ -202,15 +221,23 @@ class UnifiedOutputBuilder:
                     "contribution_entropy": None,
                 },
                 "atomic_orbital_descriptor_proxy_v1_metadata": {
-                    "version": "v1",
-                    "shape_per_atom": [
+                    "field_order": [
                         "n_dominant_ibo",
                         "sum_ibo_occupancy",
                         "mean_localization_score",
                         "contribution_entropy",
                     ],
-                    "contribution_entropy_definition": "For atom A, p_k = c_{kA} / sum_k c_{kA}; entropy = -sum_k p_k ln p_k / ln(N_A), with N_A=number of orbitals where c_{kA}>0 and entropy=0 when N_A<=1.",
-                    "dominant_ibo_definition": "Atom A is dominant for orbital k if c_{kA} is the largest atomic contribution in orbital k.",
+                    "definition_version": "v1",
+                    "source_basis": "IAO",
+                    "source_orbital_type": "occupied_IBO_only",
+                    "dominant_ibo_rule": "Atom A is dominant for orbital k if c_{kA} is the largest atomic contribution and c_{kA} >= 0.50.",
+                    "localization_score_definition": "mean_localization_score is the mean of orbital_locality_score over orbitals with c_{kA} >= 0.20 for atom A.",
+                    "contribution_entropy_definition": "For atom A, p_k = c_{kA} / sum_k c_{kA} over orbitals with c_{kA} > 0; H_A = -sum_k p_k ln(p_k) / ln(N_A), with H_A=0 when N_A<=1.",
+                    "normalization_notes": "contribution_entropy is normalized to [0,1] by ln(N_A); n_dominant_ibo and sum_ibo_occupancy are unbounded by molecular size.",
+                    "limitations": [
+                        "descriptor is proxy, not equivalent to NAO/NBO descriptors",
+                        "depends on closed-shell IBO extraction quality",
+                    ],
                 },
             },
             

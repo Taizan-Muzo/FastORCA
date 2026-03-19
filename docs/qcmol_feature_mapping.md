@@ -24,7 +24,7 @@
 | NAO descriptors | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.nao_descriptors`, `needs_exact_qcmol_name`) | external/manual review (Multiwfn/NBO) |
 | LI values | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.li_values`, `needs_exact_qcmol_name`) | external/manual review |
 | ADCH charges | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.adch_charges`) | external (Multiwfn) |
-| NBO-LP | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.nbo_lp`) | external (NBO/Multiwfn) |
+| NBO-LP | atom_features | implemented_proxy (`atom_features.atomic_lone_pair_heuristic_proxy`) | existing code (IBO + IAO charge heuristic) |
 | NPA | atom_features | implemented_proxy (`atom_features.atomic_charge_iao_proxy`) | existing code (IAO) |
 | NPA (exact) | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.npa_exact`) | external (NBO/Multiwfn) |
 | stereo info | bond_features | implemented_proxy (`bond_features.bond_stereo_info`) | existing code (RDKit) |
@@ -50,6 +50,15 @@
 - `bond_features.bond_orbital_localization_proxy`
 - `bond_features.bond_order_weighted_localization_proxy`
 - `atom_features.atomic_orbital_descriptor_proxy_v1`
+
+## B2 Proxy Fields (Open-Source, Narrow Scope)
+
+- `atom_features.atomic_lone_pair_heuristic_proxy`
+- Heuristic contract:
+  - `is_heuristic = true`
+  - `equivalent_to_nbo_lp = false`
+  - only occupied IBOs are considered
+  - if IBO inputs are unavailable, field remains `null` (not `0.0`)
 
 Frozen formulas/constraints:
 - `bond_delocalization_index_proxy_v1(i,j) = max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))`

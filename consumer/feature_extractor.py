@@ -1530,6 +1530,15 @@ class FeatureExtractor:
                     builder.set_atom_features(
                         atomic_orbital_descriptor_proxy_v1=descriptor_v1,
                     )
+
+                    lone_pair_proxy = self._compute_atomic_lone_pair_heuristic_proxy(
+                        orbital_features=orbital_features,
+                        atomic_charge_iao_proxy=iao,
+                        atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
+                    )
+                    builder.set_atom_features(
+                        atomic_lone_pair_heuristic_proxy=lone_pair_proxy,
+                    )
                 else:
                     reason = metadata.get("failure_reason", "unknown")
                     logger.warning(f"[{molecule_id}] Orbital features soft-fail: {reason}")
@@ -1990,6 +1999,86 @@ class FeatureExtractor:
             "contribution_entropy": [float(x) for x in contribution_entropy],
         }
 
+    def _compute_atomic_lone_pair_heuristic_proxy(
+        self,
+        orbital_features: Dict[str, Any],
+        atomic_charge_iao_proxy: Optional[List[float]],
+        atom_symbols: List[str],
+    ) -> Optional[List[float]]:
+        """
+        Heuristic lone-pair proxy (v1), explicitly NOT equivalent to NBO-LP.
+
+        Availability rule:
+        - Return None when IBO core inputs are unavailable.
+        - Return per-atom 0.0 when IBO inputs are available but no candidate satisfies rules.
+
+        Candidate IBO rules (occupied only):
+        - occupancy_k >= 1.5
+        - c_{kA} >= 0.70
+        - second_largest_contribution_k < 0.20
+
+        Score:
+        - lp_base(A) = max candidate c_{kA}, else 0
+        - charge_boost = clamp((-qA - 0.1) / 0.9, 0, 1)  # more negative => higher boost
+        - element_gate = 1.0 for {N,O,F,P,S,Cl,Br,I}, else 0.35
+        - score = clamp(lp_base * (0.7 + 0.3*charge_boost) * element_gate, 0, 1)
+        """
+        contributions = orbital_features.get("ibo_atom_contributions")
+        occupancies = orbital_features.get("ibo_occupancies")
+        if not isinstance(contributions, list) or not isinstance(occupancies, list):
+            return None
+
+        natm = len(atom_symbols)
+        if natm <= 0:
+            return []
+
+        n_orb = min(len(contributions), len(occupancies))
+        if n_orb == 0:
+            return [0.0] * natm
+
+        hetero_like = {"N", "O", "F", "P", "S", "Cl", "Br", "I"}
+        out: List[float] = [0.0] * natm
+
+        occ_min = 1.5
+        c_self_min = 0.70
+        c_second_max = 0.20
+
+        for a in range(natm):
+            best = 0.0
+            for k in range(n_orb):
+                contrib_k = contributions[k]
+                if not isinstance(contrib_k, (list, tuple)) or len(contrib_k) < natm:
+                    continue
+                occ = float(occupancies[k])
+                if occ < occ_min:
+                    continue
+                vec = np.array(contrib_k[:natm], dtype=float)
+                c_self = float(vec[a])
+                if c_self < c_self_min:
+                    continue
+                if natm > 1:
+                    second = float(np.partition(vec, -2)[-2])
+                else:
+                    second = 0.0
+                if second >= c_second_max:
+                    continue
+                if c_self > best:
+                    best = c_self
+
+            q = 0.0
+            if isinstance(atomic_charge_iao_proxy, list) and a < len(atomic_charge_iao_proxy):
+                try:
+                    q = float(atomic_charge_iao_proxy[a])
+                except Exception:
+                    q = 0.0
+            charge_boost = float(np.clip((-q - 0.1) / 0.9, 0.0, 1.0))
+            element = str(atom_symbols[a])
+            element_gate = 1.0 if element in hetero_like else 0.35
+            score = float(np.clip(best * (0.7 + 0.3 * charge_boost) * element_gate, 0.0, 1.0))
+            out[a] = score
+
+        return out
+
     def _normalize_bond_stereo_enum(self, rdkit_stereo: str) -> str:
         """
         统一输出键立体化学枚举值，避免暴露 RDKit 内部对象/数字。
@@ -2077,6 +2166,7 @@ class FeatureExtractor:
             ("charge_cm5", atom_feat.get("charge_cm5")),
             ("charge_iao", atom_feat.get("charge_iao")),
             ("atomic_charge_iao_proxy", atom_feat.get("atomic_charge_iao_proxy")),
+            ("atomic_lone_pair_heuristic_proxy", atom_feat.get("atomic_lone_pair_heuristic_proxy")),
             ("elf_value", atom_feat.get("elf_value")),
         ]
         
