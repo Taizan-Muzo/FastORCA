@@ -1460,13 +1460,23 @@ class FeatureExtractor:
                 
                 # M5: 获取 timeout 配置
                 timeout_seconds = None
+                realspace_runtime_config = None
                 if plugin_plan and "realspace_features" in plugin_plan:
-                    timeout_seconds = plugin_plan["realspace_features"].get("effective_timeout")
+                    realspace_plan = plugin_plan["realspace_features"]
+                    timeout_seconds = realspace_plan.get("effective_timeout")
+                    realspace_runtime_config = realspace_plan.get("runtime_config")
+                    if isinstance(realspace_runtime_config, dict):
+                        # 兼容 policy 层命名 -> realspace extractor 命名
+                        normalized_cfg = dict(realspace_runtime_config)
+                        if "max_atoms" in normalized_cfg and "max_atoms_for_cube" not in normalized_cfg:
+                            normalized_cfg["max_atoms_for_cube"] = normalized_cfg["max_atoms"]
+                        realspace_runtime_config = normalized_cfg
                 
                 realspace_result = extract_realspace_features(
                     mol, mf,
                     molecule_id=molecule_id,
                     output_dir=cube_output_dir,
+                    config=realspace_runtime_config,
                     timeout_seconds=timeout_seconds
                 )
                 
