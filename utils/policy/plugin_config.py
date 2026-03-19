@@ -18,6 +18,7 @@ class PluginConfig:
     max_atoms: Optional[int] = None
     max_total_grid_points: Optional[int] = None  # 仅 realspace
     max_memory_mb: Optional[int] = None
+    runtime_config: Optional[Dict[str, Any]] = None
     
     # 模式控制
     run_in_fast_mode: bool = False
@@ -42,6 +43,7 @@ class PluginConfig:
             max_atoms=config.get("max_atoms"),
             max_total_grid_points=config.get("max_total_grid_points"),
             max_memory_mb=config.get("max_memory_mb"),
+            runtime_config=config.get("runtime_config"),
             run_in_fast_mode=config.get("run_in_fast_mode", False),
             run_in_full_mode=config.get("run_in_full_mode", True),
             fast_mode_override=config.get("fast_mode_override", "skip"),
@@ -57,6 +59,7 @@ class PluginConfig:
             "max_atoms": self.max_atoms,
             "max_total_grid_points": self.max_total_grid_points,
             "max_memory_mb": self.max_memory_mb,
+            "runtime_config": self.runtime_config,
             "run_in_fast_mode": self.run_in_fast_mode,
             "run_in_full_mode": self.run_in_full_mode,
             "fast_mode_override": self.fast_mode_override,
@@ -204,6 +207,7 @@ class PluginRegistry:
                 "should_execute": should_run,
                 "skip_reason": reason,
                 "effective_timeout": cfg.get_effective_timeout(mode) if should_run else None,
+                "runtime_config": cfg.runtime_config if should_run else None,
             }
         return result
     
