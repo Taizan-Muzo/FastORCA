@@ -1363,10 +1363,9 @@ class FeatureExtractor:
         builder.data["_elf_alignment_stats"] = elf_alignment_stats
 
         # 对齐不完整时，标记 soft-fail reason（保持状态诚实）
-        if bond_indices and (
-            elf_alignment_stats["dropped_count"] > 0
-            or elf_alignment_stats["aligned_count"] < len(bond_indices)
-        ):
+        # 仅当 bond_indices 中存在未对齐键时才记为 partial；
+        # ELF 侧多出的键（dropped）只记录统计，不单独降级状态。
+        if bond_indices and elf_alignment_stats["aligned_count"] < len(bond_indices):
             elf_alignment_partial = True
         
         # ============ 步骤 8: 提取 CM5 电荷（扩展特征） ============

@@ -59,6 +59,14 @@ FULL_MOLECULES: List[Tuple[str, str]] = [
     ("g05_tea_like", "CCN(CC)CCO"),
 ]
 
+FULL_HARD_MOLECULES: List[Tuple[str, str]] = [
+    ("h01_caffeine", "Cn1cnc2n(C)c(=O)n(C)c(=O)c12"),
+    ("h02_aspirin", "CC(=O)Oc1ccccc1C(=O)O"),
+    ("h03_lidocaine_like", "CCN(CC)C(=O)N(c1ccccc1)C(C)C"),
+    ("h04_nitro_aniline", "Nc1ccc(cc1)[N+](=O)[O-]"),
+    ("h05_quinoline", "c1ccc2ncccc2c1"),
+]
+
 
 def get_production_profile(benchmark_path: Path | None) -> Dict[str, Any]:
     # default fallback == P0
@@ -108,6 +116,28 @@ def partial_source_breakdown(summary: Dict[str, Any]) -> Dict[str, int]:
     return {k: int(v.get("count", 0)) for k, v in hist.items() if int(v.get("count", 0)) > 0}
 
 
+def collect_partial_molecules(unified_dir: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not unified_dir.exists():
+        return rows
+    for fp in sorted(unified_dir.glob("*.unified.json")):
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            status = (data.get("calculation_status") or {}).get("overall_status")
+            if status != "core_success_partial_features":
+                continue
+            rows.append(
+                {
+                    "molecule_id": (data.get("molecule_info") or {}).get("molecule_id"),
+                    "reason_codes": data.get("_validation_errors", []),
+                    "elf_alignment_stats": data.get("_elf_alignment_stats"),
+                }
+            )
+        except Exception:
+            continue
+    return rows
+
+
 def run(args: argparse.Namespace) -> Dict[str, Any]:
     out_root = Path(args.output_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -124,7 +154,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
     fast_list = prepare_wavefunctions(calc, FAST_MOLECULES[: args.fast_n], out_root / "pkl_fast")
-    full_list = prepare_wavefunctions(calc, FULL_MOLECULES[: args.full_n], out_root / "pkl_full")
+    full_pool = FULL_MOLECULES if args.full_set == "core" else FULL_HARD_MOLECULES
+    full_list = prepare_wavefunctions(calc, full_pool[: args.full_n], out_root / "pkl_full")
 
     fast_summary = run_batch(
         feature_extractor=extractor,
@@ -166,6 +197,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     fast_by_status = ((fast_summary.get("molecule_counts") or {}).get("by_final_status") or {})
     full_by_status = ((full_summary.get("molecule_counts") or {}).get("by_final_status") or {})
     full_reason_hist = full_summary.get("reason_code_histogram") or {}
+    fast_partial_rows = collect_partial_molecules(out_root / "fast")
 
     full_partial = int(full_by_status.get("core_success_partial_features", 0))
     full_total = int((full_summary.get("molecule_counts") or {}).get("total", 0))
@@ -199,6 +231,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "basis": args.basis,
             "fast_n": args.fast_n,
             "full_n": args.full_n,
+            "full_set": args.full_set,
             "production_full_default": production,
         },
         "fast_mode": {
@@ -207,6 +240,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "reason_code_histogram": fast_summary.get("reason_code_histogram"),
             "timing_stats": fast_summary.get("timing_stats"),
             "partial_source_breakdown": partial_source_breakdown(fast_summary),
+            "partial_molecules": fast_partial_rows,
         },
         "full_mode": {
             "by_final_status": full_by_status,
@@ -233,6 +267,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--basis", default="sto-3g")
     p.add_argument("--fast-n", type=int, default=20)
     p.add_argument("--full-n", type=int, default=5)
+    p.add_argument("--full-set", choices=["core", "hard"], default="core")
     return p.parse_args()
 
 
