@@ -164,6 +164,8 @@ def build_plugin_plan(profile_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                 "realspace_core_features_expected": True,
                 "realspace_extended_features_enabled": True,
                 "realspace_extended_features_expected": True,
+                "required_artifacts": ["density"],
+                "optional_artifacts": ["homo", "lumo"],
             },
         },
         "critic2_bridge": {

@@ -44,7 +44,9 @@ DEFAULT_CUBE_CONFIG = {
     "realspace_extended_features_enabled": True,
     "realspace_extended_features_expected": True,
     "required_artifacts": ["density"],
-    "optional_artifacts": ["esp", "homo", "lumo"],
+    # Default: do not generate esp cube in production-like runs (too expensive).
+    # ESP scalar features can still be computed in extended layer without esp artifact.
+    "optional_artifacts": ["homo", "lumo"],
     "grid_resolution_angstrom": 0.2,  # Å
     "margin_angstrom": 4.0,  # Å
     "max_atoms_for_cube": 50,

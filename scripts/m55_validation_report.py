@@ -192,6 +192,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "realspace_core_features_expected": True,
                     "realspace_extended_features_enabled": False,
                     "realspace_extended_features_expected": False,
+                    "required_artifacts": ["density"],
+                    "optional_artifacts": ["homo", "lumo"],
                 },
             },
         },

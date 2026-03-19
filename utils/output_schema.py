@@ -58,6 +58,73 @@ class UnifiedOutputBuilder:
                 "spin": None,  # N_alpha - N_beta
                 "multiplicity": None  # spin + 1
             },
+
+            # qcMol paper name mapping (M5.5)
+            # Unknown abbreviation / exact label is explicitly marked with needs_exact_qcmol_name.
+            "qcmol_alignment": {
+                "basic_information": {
+                    "qcMol_ID": {"mapped_path": "molecule_info.molecule_id", "status": "implemented"},
+                    "IUPAC_name": {"mapped_path": None, "status": "missing"},
+                    "SMILES": {"mapped_path": "molecule_info.smiles", "status": "implemented"},
+                    "InChI": {"mapped_path": "molecule_info.inchi", "status": "implemented"},
+                    "InChIKey": {"mapped_path": "molecule_info.inchikey", "status": "implemented"},
+                    "chemical_formula": {"mapped_path": "molecule_info.formula", "status": "implemented"},
+                    "SMART": {
+                        "mapped_path": None,
+                        "status": "missing",
+                        "needs_exact_qcmol_name": True,  # may be SMART/SMARTS label in paper appendix
+                    },
+                    "nickname_or_synonyms": {"mapped_path": None, "status": "missing"},
+                },
+                "global_features": {
+                    "HOMO_LUMO_gap": {"mapped_path": "global_features.dft.homo_lumo_gap_hartree", "status": "implemented"},
+                    "dipole_moment": {"mapped_path": "global_features.dft.dipole_moment_debye", "status": "implemented"},
+                    "isosurface_area": {"mapped_path": "realspace_features.density_isosurface_area", "status": "implemented"},
+                    "isosurface_volume": {"mapped_path": "realspace_features.density_isosurface_volume", "status": "implemented"},
+                    "sphericity_parameters": {"mapped_path": "realspace_features.density_sphericity_like", "status": "implemented"},
+                    "molecule_size": {"mapped_path": "global_features.rdkit.heavy_atom_count", "status": "partial"},
+                    "molecular_weight": {"mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented"},
+                    "ionization_affinity_or_related": {
+                        "mapped_path": "global_features.dft.homo_energy_hartree",
+                        "status": "partial",
+                        "needs_exact_qcmol_name": True,  # ionization affinity / ionization potential wording needs exact paper term
+                    },
+                    "charge": {"mapped_path": "molecule_info.charge", "status": "implemented"},
+                },
+                "atom_features": {
+                    "element_type": {"mapped_path": "geometry.atom_symbols", "status": "implemented"},
+                    "XYZ": {"mapped_path": "geometry.atom_coords_angstrom", "status": "implemented"},
+                    "NAO_descriptors": {
+                        "mapped_path": None,
+                        "status": "missing",
+                        "needs_exact_qcmol_name": True,  # NAO descriptor definition must follow qcMol exact naming
+                    },
+                    "LI_values": {
+                        "mapped_path": None,
+                        "status": "missing",
+                        "needs_exact_qcmol_name": True,  # LI abbreviation needs exact qcMol expansion
+                    },
+                    "ADCH_charges": {"mapped_path": None, "status": "missing"},
+                    "NBO_LP": {"mapped_path": None, "status": "missing"},
+                    "NPA": {"mapped_path": "atom_features.charge_iao", "status": "partial"},
+                },
+                "bond_features": {
+                    "stereo_info": {"mapped_path": "bond_features.bond_types_rdkit", "status": "partial"},
+                    "DI_values_or_matrix": {
+                        "mapped_path": None,
+                        "status": "missing",
+                        "needs_exact_qcmol_name": True,  # DI metric definition/name must follow qcMol exact term
+                    },
+                    "ELF_values": {"mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented"},
+                    "NBO_BD": {"mapped_path": None, "status": "missing"},
+                    "LBO": {"mapped_path": None, "status": "missing"},
+                    "Mayer_BL": {"mapped_path": "bond_features.bond_orders_mayer", "status": "partial"},
+                },
+                "structural_features": {
+                    "optimized_3D_geometry": {"mapped_path": "geometry.atom_coords_angstrom", "status": "partial"},
+                    "most_stable_conformation": {"mapped_path": None, "status": "missing"},
+                },
+            },
             
             "calculation_status": {
                 "overall_status": None,
