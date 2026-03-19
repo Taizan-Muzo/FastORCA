@@ -23,6 +23,7 @@ from pyscf import lib
 import pickle
 from rdkit import Chem
 from rdkit.Chem import inchi as rdinchi
+from rdkit.Chem import AllChem
 
 # Import unified output schema (Milestone 1)
 from utils.output_schema import UnifiedOutputBuilder
@@ -1171,29 +1172,7 @@ class FeatureExtractor:
                 spin=mol.spin,  # N_alpha - N_beta
                 multiplicity=mol.spin + 1  # 2S + 1
             )
-            
-            # 设置几何信息
-            builder.set_geometry(
-                atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
-                atom_coords_angstrom=mol.atom_coords(unit='A').tolist(),
-                point_group=self._detect_point_group(mol)
-            )
-            builder.set_structural_features(
-                optimized_3d_geometry={
-                    "available": True,
-                    "source": "wavefunction_geometry",
-                    "is_proxy": False,
-                },
-                most_stable_conformation={
-                    "available": False,
-                    "source": "external_conformer_workflow_required",
-                    "is_proxy": True,
-                    "proxy_note": "Not computed in current pipeline.",
-                },
-            )
-            
-            # 设置 SCF 状态和几何优化状态（从 dft_config 显式设置）
-            scf_converged = getattr(mf, 'converged', False)
+
             # 几何优化语义：
             # - geometry_optimization=False 表示策略性不执行，不应判定 failed_geometry
             # - geometry_optimization=True 但无显式失败标志时，默认视为成功
@@ -1204,7 +1183,60 @@ class FeatureExtractor:
                 else:
                     geo_opt_success = bool(dft_config.get("geometry_optimization_success", True))
             else:
+                geo_opt_enabled = True
                 geo_opt_success = True
+            
+            # 设置几何信息
+            builder.set_geometry(
+                atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
+                atom_coords_angstrom=mol.atom_coords(unit='A').tolist(),
+                point_group=self._detect_point_group(mol)
+            )
+
+            optimized_geometry_semantic = {
+                "available": True,
+                "source": "wavefunction_geometry",
+                "is_proxy": None,
+                "coordinate_ref": "geometry.atom_coords_angstrom",
+                "semantics": "reference_to_current_working_geometry",
+                "proxy_note": None,
+                "limitations": [],
+            }
+            if geo_opt_enabled and geo_opt_success:
+                optimized_geometry_semantic["source"] = "wavefunction_geometry_after_optimization"
+                optimized_geometry_semantic["is_proxy"] = False
+            elif not geo_opt_enabled:
+                optimized_geometry_semantic["source"] = "wavefunction_geometry_no_optimization_requested"
+                optimized_geometry_semantic["is_proxy"] = True
+                optimized_geometry_semantic["proxy_note"] = (
+                    "Geometry optimization was not requested; current working geometry may not be a local minimum."
+                )
+                optimized_geometry_semantic["limitations"] = [
+                    "single-geometry reference only; no local-minimum guarantee without optimization",
+                ]
+            else:
+                optimized_geometry_semantic["source"] = "wavefunction_geometry_optimization_not_confirmed"
+                optimized_geometry_semantic["is_proxy"] = True
+                optimized_geometry_semantic["proxy_note"] = (
+                    "Geometry optimization success not confirmed; current working geometry is kept as semantic reference."
+                )
+                optimized_geometry_semantic["limitations"] = [
+                    "optimization success is not confirmed by runtime config",
+                ]
+
+            most_stable_conf = self._compute_most_stable_conformation_rdkit(
+                mol_rdkit=mol_rdkit,
+                random_seed=20260319,
+                max_conformers=20,
+                molecule_id=molecule_id,
+            )
+            builder.set_structural_features(
+                optimized_3d_geometry=optimized_geometry_semantic,
+                most_stable_conformation=most_stable_conf,
+            )
+            
+            # 设置 SCF 状态和几何优化状态
+            scf_converged = getattr(mf, 'converged', False)
 
             builder.set_status(
                 scf_convergence_success=scf_converged,
@@ -1800,6 +1832,150 @@ class FeatureExtractor:
         )
         
         return result
+
+    def _default_most_stable_conformation_proxy(
+        self,
+        random_seed: int,
+        source: str,
+        proxy_note: str,
+        n_conformers_generated: int = 0,
+        n_conformers_optimized: int = 0,
+        selection_method: Optional[str] = None,
+        ranking_energy_type: Optional[str] = None,
+        ranking_energy_value: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """构建 most_stable_conformation 的默认 proxy 结构。"""
+        return {
+            "available": False,
+            "is_proxy": True,
+            "conformer_id": None,
+            "selection_method": selection_method,
+            "selection_scope": "lowest-energy conformer within generated+optimized candidate set of current run",
+            "n_conformers_generated": int(n_conformers_generated),
+            "n_conformers_optimized": int(n_conformers_optimized),
+            "ranking_energy_type": ranking_energy_type,
+            "ranking_energy_value": ranking_energy_value,
+            "random_seed": int(random_seed),
+            "source": source,
+            "proxy_note": proxy_note,
+            "limitations": [
+                "not guaranteed to be global most stable conformation",
+                "force-field ranking only (MMFF94 or UFF), not quantum-level conformer free-energy ranking",
+            ],
+        }
+
+    def _compute_most_stable_conformation_rdkit(
+        self,
+        mol_rdkit: Optional[Chem.Mol],
+        random_seed: int = 20260319,
+        max_conformers: int = 20,
+        molecule_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        最小可用版 most_stable_conformation：
+        ETKDG 生成 + MMFF/UFF 排序，仅在当前候选集合中选择最低能构象。
+        """
+        if mol_rdkit is None:
+            return self._default_most_stable_conformation_proxy(
+                random_seed=random_seed,
+                source="rdkit_molecule_unavailable",
+                proxy_note="RDKit molecule unavailable; conformer search was not attempted.",
+            )
+
+        try:
+            mol_work = Chem.Mol(mol_rdkit)
+            if mol_work is None:
+                return self._default_most_stable_conformation_proxy(
+                    random_seed=random_seed,
+                    source="rdkit_molecule_copy_failed",
+                    proxy_note="RDKit molecule copy failed; conformer search was not attempted.",
+                )
+
+            try:
+                params = AllChem.ETKDGv3()
+            except Exception:
+                params = AllChem.ETKDG()
+            params.randomSeed = int(random_seed)
+            params.pruneRmsThresh = 0.2
+
+            conf_ids = list(AllChem.EmbedMultipleConfs(mol_work, numConfs=int(max_conformers), params=params))
+            n_generated = len(conf_ids)
+            if n_generated == 0:
+                return self._default_most_stable_conformation_proxy(
+                    random_seed=random_seed,
+                    source="rdkit_etkdg_v3",
+                    proxy_note="Conformer generation returned zero conformers.",
+                    n_conformers_generated=0,
+                    n_conformers_optimized=0,
+                    selection_method="rdkit_etkdg_v3 + forcefield_min_energy",
+                )
+
+            energies: Dict[int, float] = {}
+            ranking_energy_type: Optional[str] = None
+            selection_method = "rdkit_etkdg_v3 + forcefield_min_energy"
+
+            # First choice: MMFF94
+            mmff_props = AllChem.MMFFGetMoleculeProperties(mol_work, mmffVariant="MMFF94")
+            if mmff_props is not None:
+                ranking_energy_type = "mmff94_energy"
+                selection_method = "rdkit_etkdg_v3 + mmff94_min_energy"
+                for cid in conf_ids:
+                    ff = AllChem.MMFFGetMoleculeForceField(mol_work, mmff_props, confId=int(cid))
+                    if ff is None:
+                        continue
+                    ff.Minimize(maxIts=200)
+                    energies[int(cid)] = float(ff.CalcEnergy())
+
+            # Fallback: UFF
+            if not energies:
+                ranking_energy_type = "uff_energy"
+                selection_method = "rdkit_etkdg_v3 + uff_min_energy_fallback"
+                for cid in conf_ids:
+                    ff = AllChem.UFFGetMoleculeForceField(mol_work, confId=int(cid))
+                    if ff is None:
+                        continue
+                    ff.Minimize(maxIts=200)
+                    energies[int(cid)] = float(ff.CalcEnergy())
+
+            n_optimized = len(energies)
+            if n_optimized == 0:
+                return self._default_most_stable_conformation_proxy(
+                    random_seed=random_seed,
+                    source="rdkit_forcefield_ranking",
+                    proxy_note="Conformers were generated but force-field optimization/ranking failed.",
+                    n_conformers_generated=n_generated,
+                    n_conformers_optimized=0,
+                    selection_method=selection_method,
+                    ranking_energy_type=ranking_energy_type,
+                )
+
+            best_cid, best_energy = min(energies.items(), key=lambda kv: kv[1])
+            return {
+                "available": True,
+                "is_proxy": True,
+                "conformer_id": int(best_cid),
+                "selection_method": selection_method,
+                "selection_scope": "lowest-energy conformer within generated+optimized candidate set of current run",
+                "n_conformers_generated": int(n_generated),
+                "n_conformers_optimized": int(n_optimized),
+                "ranking_energy_type": ranking_energy_type,
+                "ranking_energy_value": float(best_energy),
+                "random_seed": int(random_seed),
+                "source": "rdkit_etkdg_forcefield_ranking",
+                "proxy_note": "Selected within current candidate set; not guaranteed global most stable conformation.",
+                "limitations": [
+                    "candidate-set minimum only, not an exhaustive conformer search",
+                    "force-field ranking only (MMFF94/UFF), not quantum free-energy ranking",
+                ],
+            }
+        except Exception as e:
+            logger.warning(f"[{molecule_id}] most_stable_conformation workflow failed: {e}")
+            return self._default_most_stable_conformation_proxy(
+                random_seed=random_seed,
+                source="rdkit_conformer_workflow_exception",
+                proxy_note=f"Conformer workflow exception: {e}",
+                selection_method="rdkit_etkdg_v3 + forcefield_min_energy",
+            )
     
     def _detect_point_group(self, mol) -> Optional[str]:
         """检测分子点群"""

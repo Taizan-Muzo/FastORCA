@@ -33,8 +33,8 @@
 | NBO-BD | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.nbo_bd`) | external (NBO/Multiwfn) |
 | LBO | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.lbo`) | external/manual review |
 | Mayer BL | bond_features | partial (`bond_orders_mayer`, naming to confirm) | existing code (PySCF) |
-| optimized 3D geometry | structural_features | partial (semantic slot available, no duplicated coordinates) | existing code + policy |
-| most stable conformation | structural_features | missing | external conformer workflow (RDKit/xTB) |
+| optimized 3D geometry | structural_features | partial (semantic reference to `geometry.atom_coords_angstrom`, no duplicated coordinates) | existing code + policy |
+| most stable conformation | structural_features | implemented_proxy (RDKit ETKDG + MMFF/UFF ranking within current candidate set) | existing code (RDKit) |
 
 ## Notes
 
@@ -59,6 +59,16 @@
   - `equivalent_to_nbo_lp = false`
   - only occupied IBOs are considered
   - if IBO inputs are unavailable, field remains `null` (not `0.0`)
+
+## B3 Structural Semantics (Open-Source, Minimal)
+
+- `structural_features.optimized_3d_geometry`:
+  - semantic reference only (`coordinate_ref = geometry.atom_coords_angstrom`)
+  - does not duplicate coordinates
+- `structural_features.most_stable_conformation`:
+  - `available=true` only when conformer generation + force-field ranking actually runs
+  - `selection_scope` is restricted to candidate conformers generated/optimized in current run
+  - `random_seed` is persisted for ETKDG reproducibility
 
 Frozen formulas/constraints:
 - `bond_delocalization_index_proxy_v1(i,j) = max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))`

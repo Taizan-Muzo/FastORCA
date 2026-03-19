@@ -135,7 +135,7 @@ class UnifiedOutputBuilder:
                 },
                 "structural_features": {
                     "optimized_3D_geometry": {"mapped_path": "structural_features.optimized_3d_geometry", "status": "partial"},
-                    "most_stable_conformation": {"mapped_path": "structural_features.most_stable_conformation", "status": "missing"},
+                    "most_stable_conformation": {"mapped_path": "structural_features.most_stable_conformation", "status": "implemented_proxy"},
                 },
             },
             
@@ -287,13 +287,26 @@ class UnifiedOutputBuilder:
                 "optimized_3d_geometry": {
                     "available": False,
                     "source": None,
-                    "is_proxy": False,
+                    "is_proxy": None,
+                    "coordinate_ref": "geometry.atom_coords_angstrom",
+                    "semantics": "reference_to_current_working_geometry",
+                    "proxy_note": None,
+                    "limitations": [],
                 },
                 "most_stable_conformation": {
                     "available": False,
-                    "source": None,
                     "is_proxy": True,
-                    "proxy_note": "requires dedicated conformer search workflow",
+                    "conformer_id": None,
+                    "selection_method": None,
+                    "selection_scope": "lowest-energy conformer within generated+optimized candidate set of current run",
+                    "n_conformers_generated": 0,
+                    "n_conformers_optimized": 0,
+                    "ranking_energy_type": None,
+                    "ranking_energy_value": None,
+                    "random_seed": None,
+                    "source": None,
+                    "proxy_note": "requires dedicated conformer generation + ranking workflow in current run",
+                    "limitations": [],
                 },
             },
             
