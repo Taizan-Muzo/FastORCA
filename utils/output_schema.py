@@ -28,6 +28,9 @@ class UnifiedOutputBuilder:
     
     SCHEMA_VERSION = "1.0.0"
     SOFTWARE_NAME = "FastORCA"
+    # Contract constants (do not store as per-placeholder runtime fields)
+    ROADMAP_STATUS_ENUM = ("missing", "placeholder", "implemented_proxy", "implemented_exact")
+    EXTERNAL_BRIDGE_EXECUTION_STATUS_ENUM = ("not_attempted", "success", "failed", "timeout", "skipped", "disabled")
     
     def __init__(self, molecule_id: str, smiles: str):
         """
@@ -352,8 +355,24 @@ class UnifiedOutputBuilder:
             
             "external_bridge": {
                 "critic2": {
-                    "execution_status": None,
+                    "execution_status": "not_attempted",
                     "failure_reason": None,
+                    # New contract fields (preferred readers/writers)
+                    "metadata": {
+                        "tool_version": None,
+                        "execution_time_seconds": None,
+                        "command": None,
+                        "parser_version": None,
+                        "environment": None,
+                    },
+                    "artifact_refs": {
+                        "input_file": None,
+                        "output_file": None,
+                        "stdout_file": None,
+                        "stderr_file": None,
+                    },
+                    "warnings": [],
+                    # Deprecated compatibility fields (write/read discouraged; use metadata/artifact_refs)
                     "input_file": None,
                     "output_file": None,
                     "execution_time_seconds": None,
@@ -380,76 +399,52 @@ class UnifiedOutputBuilder:
             "external_bridge_roadmap": {
                 "atom_level": {
                     "nao_descriptors": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": True,
                         "notes": "Placeholder for NAO descriptor payload from external bridge toolchain.",
                     },
                     "adch_charges": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": False,
                         "notes": "Placeholder for ADCH charges.",
                     },
                     "nbo_lp": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": False,
                         "notes": "Placeholder for NBO lone pair descriptors.",
                     },
                     "npa_exact": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": False,
                         "notes": "Exact NPA placeholder; do not confuse with IAO proxy.",
                     },
                     "li_values": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": True,
                         "notes": "Placeholder for LI values; abbreviation expansion pending paper-exact naming.",
                     },
                 },
                 "bond_level": {
                     "di_values_or_matrix": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": True,
                         "notes": "Placeholder for DI values/matrix with exact qcMol naming pending.",
                     },
                     "nbo_bd": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": False,
                         "notes": "Placeholder for NBO bond descriptors.",
                     },
                     "lbo": {
-                        "available": False,
                         "status": "missing",
-                        "source": "external_bridge",
-                        "value": None,
-                        "is_proxy": False,
+                        "payload": None,
                         "needs_exact_qcmol_name": False,
                         "notes": "Placeholder for localized bond order payload.",
                     },
@@ -624,8 +619,27 @@ class UnifiedOutputBuilder:
             **kwargs: bridge 信息字段
         """
         if tool in self.data["external_bridge"]:
+            node = self.data["external_bridge"][tool]
             for key, value in kwargs.items():
-                self.data["external_bridge"][tool][key] = value
+                if key == "execution_status":
+                    if value not in self.EXTERNAL_BRIDGE_EXECUTION_STATUS_ENUM:
+                        # invalid enum falls back to failed for contract safety
+                        node["execution_status"] = "failed"
+                        node["failure_reason"] = f"invalid_execution_status:{value}"
+                    else:
+                        node["execution_status"] = value
+                elif key == "metadata" and isinstance(value, dict):
+                    if "metadata" not in node or not isinstance(node["metadata"], dict):
+                        node["metadata"] = {}
+                    node["metadata"].update(value)
+                elif key == "artifact_refs" and isinstance(value, dict):
+                    if "artifact_refs" not in node or not isinstance(node["artifact_refs"], dict):
+                        node["artifact_refs"] = {}
+                    node["artifact_refs"].update(value)
+                elif key == "warnings" and isinstance(value, list):
+                    node["warnings"] = value
+                elif key in node:
+                    node[key] = value
         return self
     
     def set_external_features(self, tool: str, features: dict) -> "UnifiedOutputBuilder":
@@ -652,7 +666,11 @@ class UnifiedOutputBuilder:
         if level in roadmap and feature in roadmap[level] and isinstance(roadmap[level][feature], dict):
             for key, value in kwargs.items():
                 if key in roadmap[level][feature]:
-                    roadmap[level][feature][key] = value
+                    if key == "status":
+                        if value in self.ROADMAP_STATUS_ENUM:
+                            roadmap[level][feature][key] = value
+                    else:
+                        roadmap[level][feature][key] = value
         return self
     
     # ============ 状态判定方法 ============

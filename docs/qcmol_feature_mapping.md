@@ -42,6 +42,25 @@
 - Allowed status levels in this table: `implemented_exact / implemented_proxy / partial / missing`.
 - This file is a working contract for M5.5 naming convergence; do not rename unknown terms without paper-exact confirmation.
 
+## External Bridge Contract
+
+- Layer split:
+  - `external_bridge`: execution contract only (status/failure/metadata/artifact refs/warnings).
+  - `external_features`: parsed scientific features only.
+  - `external_bridge_roadmap`: standardized placeholders for unimplemented or terminology-pending items.
+- `external_bridge.<tool>.execution_status` enum is fixed to:
+  - `not_attempted | success | failed | timeout | skipped | disabled`
+- `external_bridge_roadmap` placeholder keys are fixed to:
+  - `status | payload | needs_exact_qcmol_name | notes`
+- Roadmap `status` enum is fixed to:
+  - `missing | placeholder | implemented_proxy | implemented_exact`
+- Semantics:
+  - `needs_exact_qcmol_name` only indicates whether feature naming/term freeze is pending.
+  - `notes` is only for implementation/definition remarks.
+- Backward compatibility:
+  - `external_bridge.<tool>.input_file/output_file/execution_time_seconds/critic2_version` are **deprecated**.
+  - New code should read/write `metadata` and `artifact_refs` first.
+
 ## bond_indices Semantics
 
 - `bond_indices` is a bond list aligned to all bond-level arrays in the same order.

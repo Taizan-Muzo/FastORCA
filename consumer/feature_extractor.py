@@ -1643,14 +1643,30 @@ class FeatureExtractor:
                     critic2_result = run_critic2_analysis(bridge_context)
                     
                     # 填入 external_bridge
+                    # New contract first: metadata + artifact_refs
                     builder.set_external_bridge(
                         "critic2",
                         execution_status=critic2_result.execution_status,
                         failure_reason=critic2_result.failure_reason,
-                        input_file=critic2_result.bridge_input_file,
-                        output_file=critic2_result.bridge_output_file,
-                        execution_time_seconds=critic2_result.bridge_execution_time_seconds,
-                        critic2_version=critic2_result.bridge_tool_version,
+                        metadata={
+                            "tool_version": critic2_result.bridge_tool_version,
+                            "execution_time_seconds": critic2_result.bridge_execution_time_seconds,
+                            "command": None,
+                            "parser_version": "critic2_adapter_v1",
+                            "environment": None,
+                        },
+                        artifact_refs={
+                            "input_file": critic2_result.bridge_input_file,
+                            "output_file": critic2_result.bridge_output_file,
+                            "stdout_file": None,
+                            "stderr_file": None,
+                        },
+                        warnings=[],
+                        # Deprecated compatibility fields (legacy readers only)
+                        input_file=critic2_result.bridge_input_file,   # deprecated
+                        output_file=critic2_result.bridge_output_file,  # deprecated
+                        execution_time_seconds=critic2_result.bridge_execution_time_seconds,  # deprecated
+                        critic2_version=critic2_result.bridge_tool_version,  # deprecated
                     )
                     
                     # 填入 external_features
@@ -1666,7 +1682,8 @@ class FeatureExtractor:
                     builder.set_external_bridge(
                         "critic2",
                         execution_status="skipped",
-                        failure_reason="no_density_cube_available"
+                        failure_reason="no_density_cube_available",
+                        warnings=["density_cube_missing"],
                     )
                     
             except Exception as e:
@@ -1674,15 +1691,23 @@ class FeatureExtractor:
                 builder.set_external_bridge(
                     "critic2",
                     execution_status="failed",
-                    failure_reason=f"external_execution_failed: {e}"
+                    failure_reason=f"external_execution_failed: {e}",
+                    warnings=[str(e)],
                 )
         elif critic2_skip_reason:
             # 策略性跳过
             logger.info(f"[{molecule_id}] Skipping critic2: {critic2_skip_reason}")
             builder.set_external_bridge(
                 "critic2",
-                execution_status="skipped",
+                execution_status="disabled",
                 failure_reason=critic2_skip_reason
+            )
+        elif plugin_plan and "critic2_bridge" in plugin_plan and not should_run_critic2:
+            # 明确标记为 disabled（未给 skip_reason 的配置性关闭）
+            builder.set_external_bridge(
+                "critic2",
+                execution_status="disabled",
+                failure_reason="disabled_by_plan",
             )
         
         # 长度校验 (M5: 记录 reason codes)
