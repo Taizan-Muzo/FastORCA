@@ -8,7 +8,7 @@
 | InChI | basic_information | implemented_exact (`molecule_info.inchi`) | existing code + RDKit |
 | InChIKey | basic_information | implemented_exact (`molecule_info.inchikey`) | existing code + RDKit |
 | chemical formula | basic_information | implemented_exact (`molecule_info.formula`) | existing code (RDKit) |
-| SMART | basic_information | implemented_proxy (`molecule_info.smarts`, `needs_exact_qcmol_name`) | existing code + manual review |
+| SMART | basic_information | implemented_proxy (`molecule_info.smarts`, `needs_exact_qcmol_name`) | existing code (`RemoveHs + MolToSmarts`) + manual review |
 | nickname / synonyms | basic_information | missing | external (PubChem/ChEBI) + manual review |
 | HOMO-LUMO gap | global_features | implemented_exact (`global_features.dft.homo_lumo_gap_hartree`) | existing code (PySCF) |
 | dipole moment | global_features | implemented_exact (`global_features.dft.dipole_moment_debye`) | existing code (PySCF) |

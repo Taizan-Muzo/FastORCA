@@ -1123,12 +1123,13 @@ class FeatureExtractor:
 
                     # 2) SMARTS / SMART (proxy, pending exact qcMol naming freeze)
                     try:
-                        smarts = Chem.MolToSmarts(mol_rdkit)
+                        smarts_mol = Chem.RemoveHs(mol_rdkit)
+                        smarts = Chem.MolToSmarts(smarts_mol, isomericSmiles=True)
                         builder.set_molecule_info(smarts=smarts)
                         builder.set_molecule_representation_metadata(
                             "smarts",
                             available=bool(smarts),
-                            source="rdkit_canonical_smarts",
+                            source="rdkit_canonical_smarts_remove_hs",
                             is_proxy=True,
                             proxy_note="Proxy representation; waiting for exact qcMol SMART naming/definition freeze.",
                         )
@@ -1137,7 +1138,7 @@ class FeatureExtractor:
                         builder.set_molecule_representation_metadata(
                             "smarts",
                             available=False,
-                            source="rdkit_canonical_smarts",
+                            source="rdkit_canonical_smarts_remove_hs",
                             is_proxy=True,
                             proxy_note=f"SMARTS generation failed: {e}",
                         )
