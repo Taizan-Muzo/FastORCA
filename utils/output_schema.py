@@ -176,6 +176,9 @@ class UnifiedOutputBuilder:
             "runtime_metadata": {
                 "unified_extraction_time_seconds": None,
                 "extraction_timestamp": None,
+                "elf_bond_midpoints_raw_count": None,
+                "elf_bond_midpoints_aligned_count": None,
+                "elf_bond_midpoints_dropped_count": None,
                 "schema_build_finalized": False
             },
             

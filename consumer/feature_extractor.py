@@ -1320,6 +1320,7 @@ class FeatureExtractor:
             "aligned_count": 0,
             "dropped_count": 0,
         }
+        elf_alignment_partial = False
         
         if mol is not None and mf is not None:
             try:
@@ -1335,11 +1336,28 @@ class FeatureExtractor:
                 )
             except Exception as e:
                 logger.warning(f"[{molecule_id}] ELF extraction failed: {e}")
-                elf_bond_midpoints = []
-        
+                # 保持与 bond_indices 严格对齐，避免长度 mismatch
+                elf_bond_midpoints = [0.0] * len(bond_indices)
+                elf_alignment_stats = {
+                    "raw_count": 0,
+                    "aligned_count": 0,
+                    "dropped_count": 0,
+                }
+
         builder.set_bond_features(elf_bond_midpoint=elf_bond_midpoints)
-        # 记录对齐统计到 metadata
+        # 记录对齐统计到 runtime_metadata
+        builder.data["runtime_metadata"]["elf_bond_midpoints_raw_count"] = elf_alignment_stats["raw_count"]
+        builder.data["runtime_metadata"]["elf_bond_midpoints_aligned_count"] = elf_alignment_stats["aligned_count"]
+        builder.data["runtime_metadata"]["elf_bond_midpoints_dropped_count"] = elf_alignment_stats["dropped_count"]
+        # 向后兼容：保留旧的内部统计字段
         builder.data["_elf_alignment_stats"] = elf_alignment_stats
+
+        # 对齐不完整时，标记 soft-fail reason（保持状态诚实）
+        if bond_indices and (
+            elf_alignment_stats["dropped_count"] > 0
+            or elf_alignment_stats["aligned_count"] < len(bond_indices)
+        ):
+            elf_alignment_partial = True
         
         # ============ 步骤 8: 提取 CM5 电荷（扩展特征） ============
         if mol is not None and mf is not None:
@@ -1578,12 +1596,16 @@ class FeatureExtractor:
         
         # 长度校验 (M5: 记录 reason codes)
         valid, mismatch_reasons = self._validate_feature_lengths(builder, molecule_id)
-        if mismatch_reasons:
+        validation_reasons = list(mismatch_reasons)
+        if elf_alignment_partial and "elf_alignment_partial" not in validation_reasons:
+            validation_reasons.append("elf_alignment_partial")
+
+        if validation_reasons:
             # 将 length mismatch 记录到 error_messages 和 metadata
-            for reason in mismatch_reasons:
+            for reason in validation_reasons:
                 builder.add_error(f"Feature validation: {reason}")
             # 存储到 builder 的特殊字段供 StatusDeterminer 使用
-            builder.data["_validation_errors"] = mismatch_reasons
+            builder.data["_validation_errors"] = validation_reasons
         
         # 记录耗时到 runtime_metadata（正式 schema）
         elapsed = time.time() - start_time
@@ -1819,20 +1841,37 @@ class FeatureExtractor:
         
         if not elf_midpoints or not elf_bond_pairs:
             # 无 ELF 数据，返回零填充
+            stats["dropped_count"] = len(elf_midpoints)
             return [0.0] * len(bond_indices), stats
-        
+
         # 构建 ELF 数据字典：key = 无向排序键, value = midpoint
         elf_dict = {}
+        invalid_or_unusable_elf_rows = 0
         for pair, midpoint in zip(elf_bond_pairs, elf_midpoints):
-            # 统一使用无向排序键
-            canonical = (min(pair[0], pair[1]), max(pair[0], pair[1]))
-            if canonical in elf_dict:
-                logger.warning(f"[{molecule_id}] Duplicate ELF bond: {canonical}")
-            elf_dict[canonical] = midpoint
-        
+            try:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    invalid_or_unusable_elf_rows += 1
+                    logger.warning(f"[{molecule_id}] Invalid ELF bond pair format: {pair}")
+                    continue
+                i, j = int(pair[0]), int(pair[1])
+                canonical = (min(i, j), max(i, j))
+                if canonical in elf_dict:
+                    logger.warning(f"[{molecule_id}] Duplicate ELF bond: {canonical}")
+                elf_dict[canonical] = float(midpoint)
+            except Exception:
+                invalid_or_unusable_elf_rows += 1
+                logger.warning(f"[{molecule_id}] Failed to parse ELF bond pair: {pair}")
+
+        # elf_midpoints 和 elf_bond_pairs 长度不一致时，超出的 midpoint 视为 dropped
+        if len(elf_midpoints) > len(elf_bond_pairs):
+            invalid_or_unusable_elf_rows += len(elf_midpoints) - len(elf_bond_pairs)
+
         # 按 bond_indices 顺序重建 midpoints
         aligned_midpoints = []
         for bond in bond_indices:
+            if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+                aligned_midpoints.append(0.0)
+                continue
             canonical = (min(bond[0], bond[1]), max(bond[0], bond[1]))
             if canonical in elf_dict:
                 aligned_midpoints.append(elf_dict[canonical])
@@ -1849,7 +1888,9 @@ class FeatureExtractor:
         for canonical in elf_dict:
             if canonical not in bond_indices_set:
                 stats["dropped_count"] += 1
-        
+
+        stats["dropped_count"] += invalid_or_unusable_elf_rows
+
         if stats["dropped_count"] > 0 or stats["aligned_count"] < len(bond_indices):
             logger.info(
                 f"[{molecule_id}] ELF alignment: "
