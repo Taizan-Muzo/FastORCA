@@ -2020,8 +2020,9 @@ class FeatureExtractor:
         Score:
         - lp_base(A) = max candidate c_{kA}, else 0
         - charge_boost = clamp((-qA - 0.1) / 0.9, 0, 1)  # more negative => higher boost
-        - element_gate = 1.0 for {N,O,F,P,S,Cl,Br,I}, else 0.35
-        - score = clamp(lp_base * (0.7 + 0.3*charge_boost) * element_gate, 0, 1)
+        - element_gate = 1.0 for {N,O,F,P,S,Cl,Br,I}, else 0.18
+        - non_negative_charge_penalty = 0.9 if qA >= 0 else 1.0
+        - score = clamp(lp_base * (0.7 + 0.3*charge_boost) * element_gate * non_negative_charge_penalty, 0, 1)
         """
         contributions = orbital_features.get("ibo_atom_contributions")
         occupancies = orbital_features.get("ibo_occupancies")
@@ -2073,8 +2074,15 @@ class FeatureExtractor:
                     q = 0.0
             charge_boost = float(np.clip((-q - 0.1) / 0.9, 0.0, 1.0))
             element = str(atom_symbols[a])
-            element_gate = 1.0 if element in hetero_like else 0.35
-            score = float(np.clip(best * (0.7 + 0.3 * charge_boost) * element_gate, 0.0, 1.0))
+            element_gate = 1.0 if element in hetero_like else 0.18
+            non_negative_charge_penalty = 0.9 if q >= 0.0 else 1.0
+            score = float(
+                np.clip(
+                    best * (0.7 + 0.3 * charge_boost) * element_gate * non_negative_charge_penalty,
+                    0.0,
+                    1.0,
+                )
+            )
             out[a] = score
 
         return out
