@@ -86,8 +86,7 @@ def total_cube_bytes(data: Dict[str, Any]) -> int:
     return total
 
 
-def build_plugin_plan(profile_name: str, profile_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    is_research_like = profile_name in ("P2",)
+def build_plugin_plan(profile_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {
         "orbital_features": {
             "should_execute": True,
@@ -103,8 +102,6 @@ def build_plugin_plan(profile_name: str, profile_cfg: Dict[str, Any]) -> Dict[st
                 "max_total_grid_points": profile_cfg["max_total_grid_points"],
                 "grid_resolution_angstrom": profile_cfg["grid_resolution_angstrom"],
                 "margin_angstrom": profile_cfg["margin_angstrom"],
-                "generate_esp_cube_file": is_research_like,
-                "generate_orbital_cube_files": is_research_like,
             },
         },
         "critic2_bridge": {
@@ -204,7 +201,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
         if profile_name not in DEFAULT_PROFILES:
             raise ValueError(f"Unknown profile: {profile_name}")
         profile_cfg = DEFAULT_PROFILES[profile_name]
-        plugin_plan = build_plugin_plan(profile_name, profile_cfg)
+        plugin_plan = build_plugin_plan(profile_cfg)
         profile_out = out_root / profile_name
         profile_out.mkdir(parents=True, exist_ok=True)
 

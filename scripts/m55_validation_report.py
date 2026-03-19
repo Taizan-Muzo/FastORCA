@@ -188,8 +188,6 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "max_total_grid_points": production["max_total_grid_points"],
                     "grid_resolution_angstrom": production["grid_resolution_angstrom"],
                     "margin_angstrom": production["margin_angstrom"],
-                    "generate_esp_cube_file": False,
-                    "generate_orbital_cube_files": False,
                 },
             },
         },
