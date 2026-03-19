@@ -32,6 +32,8 @@ BOHR_TO_ANGSTROM = 0.52917720859  # Bohr -> Å
 # 默认配置
 DEFAULT_CUBE_CONFIG = {
     "enable_cube_generation": True,
+    "generate_esp_cube_file": True,
+    "generate_orbital_cube_files": True,
     "grid_resolution_angstrom": 0.2,  # Å
     "margin_angstrom": 4.0,  # Å
     "max_atoms_for_cube": 50,
@@ -245,40 +247,45 @@ class RealspaceFeatureExtractor:
                 "source_method": "pyscf.tools.cubegen.density"
             }
             
-            # Step 3: 生成 MEP Cube
-            logger.debug(f"[{molecule_id}] Generating MEP cube...")
-            mep_path = cube_dir / "mep.cube"
-            cubegen.mep(
-                mol,
-                str(mep_path),
-                dm,
-                nx=int(grid_shape[0]),
-                ny=int(grid_shape[1]),
-                nz=int(grid_shape[2]),
-                resolution=res_bohr,
-                margin=margin_bohr
-            )
+            # Step 3: 生成 MEP Cube（可选，I/O 较重）
+            generate_esp_cube = bool(self.config.get("generate_esp_cube_file", True))
+            result["metadata"]["esp_cube_generated"] = generate_esp_cube
+            if generate_esp_cube:
+                logger.debug(f"[{molecule_id}] Generating MEP cube...")
+                mep_path = cube_dir / "mep.cube"
+                cubegen.mep(
+                    mol,
+                    str(mep_path),
+                    dm,
+                    nx=int(grid_shape[0]),
+                    ny=int(grid_shape[1]),
+                    nz=int(grid_shape[2]),
+                    resolution=res_bohr,
+                    margin=margin_bohr
+                )
+                
+                result["artifacts"]["cube_files"]["esp"] = {
+                    "path": str(mep_path),
+                    "file_type": "gaussian_cube",
+                    "value_type": "electrostatic_potential",
+                    "value_unit": "hartree",
+                    "grid_shape": grid_shape.tolist(),
+                    "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
+                    "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
+                    "native_grid_unit": "bohr",
+                    "source_method": "pyscf.tools.cubegen.mep"
+                }
             
-            result["artifacts"]["cube_files"]["esp"] = {
-                "path": str(mep_path),
-                "file_type": "gaussian_cube",
-                "value_type": "electrostatic_potential",
-                "value_unit": "hartree",
-                "grid_shape": grid_shape.tolist(),
-                "spacing_angstrom": [self.config["grid_resolution_angstrom"]] * 3,
-                "origin_angstrom": result["artifacts"]["cube_files"]["density"]["origin_angstrom"],
-                "native_grid_unit": "bohr",
-                "source_method": "pyscf.tools.cubegen.mep"
-            }
-            
-            # Step 4: 生成 HOMO/LUMO Cubes
+            # Step 4: 生成 HOMO/LUMO Cubes（可选，I/O 最重）
+            generate_orbital_cubes = bool(self.config.get("generate_orbital_cube_files", True))
+            result["metadata"]["orbital_cubes_generated"] = generate_orbital_cubes
             occ_idx = mf.mo_occ > 0
             n_occ = np.sum(occ_idx)
             homo_idx = n_occ - 1
             lumo_idx = n_occ
             
             # HOMO
-            if homo_idx >= 0 and homo_idx < mf.mo_coeff.shape[1]:
+            if generate_orbital_cubes and homo_idx >= 0 and homo_idx < mf.mo_coeff.shape[1]:
                 logger.debug(f"[{molecule_id}] Generating HOMO cube (MO {homo_idx})...")
                 homo_path = cube_dir / "homo.cube"
                 cubegen.orbital(
@@ -308,7 +315,7 @@ class RealspaceFeatureExtractor:
                 }
             
             # LUMO
-            if lumo_idx < mf.mo_coeff.shape[1]:
+            if generate_orbital_cubes and lumo_idx < mf.mo_coeff.shape[1]:
                 logger.debug(f"[{molecule_id}] Generating LUMO cube (MO {lumo_idx})...")
                 lumo_path = cube_dir / "lumo.cube"
                 cubegen.orbital(
@@ -385,6 +392,8 @@ class RealspaceFeatureExtractor:
                 "orbital_isovalue": self.config["orbital_isovalue"],
                 "cube_grid_shape": None,
                 "cube_spacing_angstrom": None,
+                "esp_cube_generated": None,
+                "orbital_cubes_generated": None,
                 "extraction_status": "not_attempted",
                 "failure_reason": None,
                 "extraction_time_seconds": None,
