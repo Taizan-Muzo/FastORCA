@@ -50,50 +50,59 @@ class UnifiedOutputBuilder:
             "molecule_info": {
                 "molecule_id": molecule_id,
                 "smiles": smiles,
+                "smarts": None,
                 "inchi": None,
                 "inchikey": None,
                 "formula": None,
                 "natm": None,
                 "charge": None,
                 "spin": None,  # N_alpha - N_beta
-                "multiplicity": None  # spin + 1
+                "multiplicity": None,  # spin + 1
+                "representation_metadata": {
+                    "smarts": {
+                        "available": False,
+                        "source": None,
+                        "is_proxy": True,
+                        "proxy_note": None,
+                    }
+                }
             },
 
             # qcMol paper name mapping (M5.5)
             # Unknown abbreviation / exact label is explicitly marked with needs_exact_qcmol_name.
             "qcmol_alignment": {
                 "basic_information": {
-                    "qcMol_ID": {"mapped_path": "molecule_info.molecule_id", "status": "implemented"},
+                    "qcMol_ID": {"mapped_path": "molecule_info.molecule_id", "status": "implemented_exact"},
                     "IUPAC_name": {"mapped_path": None, "status": "missing"},
-                    "SMILES": {"mapped_path": "molecule_info.smiles", "status": "implemented"},
-                    "InChI": {"mapped_path": "molecule_info.inchi", "status": "implemented"},
-                    "InChIKey": {"mapped_path": "molecule_info.inchikey", "status": "implemented"},
-                    "chemical_formula": {"mapped_path": "molecule_info.formula", "status": "implemented"},
+                    "SMILES": {"mapped_path": "molecule_info.smiles", "status": "implemented_exact"},
+                    "InChI": {"mapped_path": "molecule_info.inchi", "status": "implemented_exact"},
+                    "InChIKey": {"mapped_path": "molecule_info.inchikey", "status": "implemented_exact"},
+                    "chemical_formula": {"mapped_path": "molecule_info.formula", "status": "implemented_exact"},
                     "SMART": {
-                        "mapped_path": None,
-                        "status": "missing",
+                        "mapped_path": "molecule_info.smarts",
+                        "status": "implemented_proxy",
                         "needs_exact_qcmol_name": True,  # may be SMART/SMARTS label in paper appendix
                     },
                     "nickname_or_synonyms": {"mapped_path": None, "status": "missing"},
                 },
                 "global_features": {
-                    "HOMO_LUMO_gap": {"mapped_path": "global_features.dft.homo_lumo_gap_hartree", "status": "implemented"},
-                    "dipole_moment": {"mapped_path": "global_features.dft.dipole_moment_debye", "status": "implemented"},
-                    "isosurface_area": {"mapped_path": "realspace_features.density_isosurface_area", "status": "implemented"},
-                    "isosurface_volume": {"mapped_path": "realspace_features.density_isosurface_volume", "status": "implemented"},
-                    "sphericity_parameters": {"mapped_path": "realspace_features.density_sphericity_like", "status": "implemented"},
+                    "HOMO_LUMO_gap": {"mapped_path": "global_features.dft.homo_lumo_gap_hartree", "status": "implemented_exact"},
+                    "dipole_moment": {"mapped_path": "global_features.dft.dipole_moment_debye", "status": "implemented_exact"},
+                    "isosurface_area": {"mapped_path": "realspace_features.density_isosurface_area", "status": "implemented_exact"},
+                    "isosurface_volume": {"mapped_path": "realspace_features.density_isosurface_volume", "status": "implemented_exact"},
+                    "sphericity_parameters": {"mapped_path": "realspace_features.density_sphericity_like", "status": "implemented_exact"},
                     "molecule_size": {"mapped_path": "global_features.rdkit.heavy_atom_count", "status": "partial"},
-                    "molecular_weight": {"mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented"},
+                    "molecular_weight": {"mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented_exact"},
                     "ionization_affinity_or_related": {
                         "mapped_path": "global_features.dft.homo_energy_hartree",
                         "status": "partial",
                         "needs_exact_qcmol_name": True,  # ionization affinity / ionization potential wording needs exact paper term
                     },
-                    "charge": {"mapped_path": "molecule_info.charge", "status": "implemented"},
+                    "charge": {"mapped_path": "molecule_info.charge", "status": "implemented_exact"},
                 },
                 "atom_features": {
-                    "element_type": {"mapped_path": "geometry.atom_symbols", "status": "implemented"},
-                    "XYZ": {"mapped_path": "geometry.atom_coords_angstrom", "status": "implemented"},
+                    "element_type": {"mapped_path": "geometry.atom_symbols", "status": "implemented_exact"},
+                    "XYZ": {"mapped_path": "geometry.atom_coords_angstrom", "status": "implemented_exact"},
                     "NAO_descriptors": {
                         "mapped_path": None,
                         "status": "missing",
@@ -106,23 +115,23 @@ class UnifiedOutputBuilder:
                     },
                     "ADCH_charges": {"mapped_path": None, "status": "missing"},
                     "NBO_LP": {"mapped_path": None, "status": "missing"},
-                    "NPA": {"mapped_path": "atom_features.charge_iao", "status": "partial"},
+                    "NPA": {"mapped_path": "atom_features.charge_iao", "status": "implemented_proxy"},
                 },
                 "bond_features": {
-                    "stereo_info": {"mapped_path": "bond_features.bond_types_rdkit", "status": "partial"},
+                    "stereo_info": {"mapped_path": "bond_features.bond_stereo_info", "status": "implemented_proxy"},
                     "DI_values_or_matrix": {
                         "mapped_path": None,
                         "status": "missing",
                         "needs_exact_qcmol_name": True,  # DI metric definition/name must follow qcMol exact term
                     },
-                    "ELF_values": {"mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented"},
+                    "ELF_values": {"mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented_exact"},
                     "NBO_BD": {"mapped_path": None, "status": "missing"},
                     "LBO": {"mapped_path": None, "status": "missing"},
                     "Mayer_BL": {"mapped_path": "bond_features.bond_orders_mayer", "status": "partial"},
                 },
                 "structural_features": {
-                    "optimized_3D_geometry": {"mapped_path": "geometry.atom_coords_angstrom", "status": "partial"},
-                    "most_stable_conformation": {"mapped_path": None, "status": "missing"},
+                    "optimized_3D_geometry": {"mapped_path": "structural_features.optimized_3d_geometry", "status": "partial"},
+                    "most_stable_conformation": {"mapped_path": "structural_features.most_stable_conformation", "status": "missing"},
                 },
             },
             
@@ -181,9 +190,33 @@ class UnifiedOutputBuilder:
             "bond_features": {
                 "bond_indices": None,
                 "bond_types_rdkit": None,
+                "bond_stereo_info": None,
                 "bond_orders_mayer": None,
                 "bond_orders_wiberg": None,
-                "elf_bond_midpoint": None
+                "elf_bond_midpoint": None,
+                "metadata": {
+                    "bond_stereo_info": {
+                        "available": False,
+                        "source": None,
+                        "is_proxy": True,
+                        "proxy_note": None,
+                        "enum_values": ["none", "any", "cis", "trans", "e", "z", "unknown"],
+                    }
+                }
+            },
+
+            "structural_features": {
+                "optimized_3d_geometry": {
+                    "available": False,
+                    "source": None,
+                    "is_proxy": False,
+                },
+                "most_stable_conformation": {
+                    "available": False,
+                    "source": None,
+                    "is_proxy": True,
+                    "proxy_note": "requires dedicated conformer search workflow",
+                },
             },
             
             "artifacts": {
@@ -350,6 +383,15 @@ class UnifiedOutputBuilder:
             if key in self.data["molecule_info"]:
                 self.data["molecule_info"][key] = value
         return self
+
+    def set_molecule_representation_metadata(self, representation: str, **kwargs) -> "UnifiedOutputBuilder":
+        """设置分子表示层 metadata（如 SMARTS 的 proxy 信息）"""
+        rep_meta = self.data["molecule_info"].get("representation_metadata", {})
+        if representation in rep_meta and isinstance(rep_meta[representation], dict):
+            for key, value in kwargs.items():
+                if key in rep_meta[representation]:
+                    rep_meta[representation][key] = value
+        return self
     
     def set_status(self, **kwargs) -> "UnifiedOutputBuilder":
         """设置计算状态"""
@@ -394,8 +436,24 @@ class UnifiedOutputBuilder:
     def set_bond_features(self, **kwargs) -> "UnifiedOutputBuilder":
         """设置键特征（统一 list 模式）"""
         for key, value in kwargs.items():
-            if key in self.data["bond_features"]:
+            if key in self.data["bond_features"] and key != "metadata":
                 self.data["bond_features"][key] = value
+        return self
+
+    def set_bond_metadata(self, feature: str, **kwargs) -> "UnifiedOutputBuilder":
+        """设置键特征 metadata（如 stereo 的 proxy 信息）"""
+        meta = self.data["bond_features"].get("metadata", {})
+        if feature in meta and isinstance(meta[feature], dict):
+            for key, value in kwargs.items():
+                if key in meta[feature]:
+                    meta[feature][key] = value
+        return self
+
+    def set_structural_features(self, **kwargs) -> "UnifiedOutputBuilder":
+        """设置结构层特征（optimized_3d_geometry / most_stable_conformation）"""
+        for key, value in kwargs.items():
+            if key in self.data["structural_features"]:
+                self.data["structural_features"][key] = value
         return self
     
     def set_artifacts_wavefunction(self, **kwargs) -> "UnifiedOutputBuilder":

@@ -22,6 +22,7 @@ from pyscf.lo import orth
 from pyscf import lib
 import pickle
 from rdkit import Chem
+from rdkit.Chem import inchi as rdinchi
 
 # Import unified output schema (Milestone 1)
 from utils.output_schema import UnifiedOutputBuilder
@@ -1112,6 +1113,35 @@ class FeatureExtractor:
                     formula = rdMolDescriptors.CalcMolFormula(mol_rdkit)
                     builder.set_molecule_info(formula=formula)
                     
+                    # 1) InChI / InChIKey (exact standard generation)
+                    try:
+                        inchi = rdinchi.MolToInchi(mol_rdkit)
+                        inchikey = rdinchi.MolToInchiKey(mol_rdkit)
+                        builder.set_molecule_info(inchi=inchi, inchikey=inchikey)
+                    except Exception as e:
+                        logger.warning(f"[{molecule_id}] InChI generation failed: {e}")
+
+                    # 2) SMARTS / SMART (proxy, pending exact qcMol naming freeze)
+                    try:
+                        smarts = Chem.MolToSmarts(mol_rdkit)
+                        builder.set_molecule_info(smarts=smarts)
+                        builder.set_molecule_representation_metadata(
+                            "smarts",
+                            available=bool(smarts),
+                            source="rdkit_canonical_smarts",
+                            is_proxy=True,
+                            proxy_note="Proxy representation; waiting for exact qcMol SMART naming/definition freeze.",
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{molecule_id}] SMARTS generation failed: {e}")
+                        builder.set_molecule_representation_metadata(
+                            "smarts",
+                            available=False,
+                            source="rdkit_canonical_smarts",
+                            is_proxy=True,
+                            proxy_note=f"SMARTS generation failed: {e}",
+                        )
+                    
                 else:
                     builder.set_status(rdkit_parse_success=False, invalid_input=True)
                     builder.add_error(f"RDKit failed to parse SMILES: '{smiles}'")
@@ -1146,6 +1176,19 @@ class FeatureExtractor:
                 atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
                 atom_coords_angstrom=mol.atom_coords(unit='A').tolist(),
                 point_group=self._detect_point_group(mol)
+            )
+            builder.set_structural_features(
+                optimized_3d_geometry={
+                    "available": True,
+                    "source": "wavefunction_geometry",
+                    "is_proxy": False,
+                },
+                most_stable_conformation={
+                    "available": False,
+                    "source": "external_conformer_workflow_required",
+                    "is_proxy": True,
+                    "proxy_note": "Not computed in current pipeline.",
+                },
             )
             
             # 设置 SCF 状态和几何优化状态（从 dft_config 显式设置）
@@ -1267,6 +1310,7 @@ class FeatureExtractor:
         # 初始化空键数组（空分子也使用 [] 而不是 None）
         bond_indices: List[List[int]] = []
         bond_types: List[Optional[str]] = []
+        bond_stereo_info: List[str] = []
         mayer_values: List[float] = []
         wiberg_values: List[float] = []
         
@@ -1280,6 +1324,7 @@ class FeatureExtractor:
                     if 0 <= i < mol.natm and 0 <= j < mol.natm:
                         bond_indices.append([i, j])
                         bond_types.append(str(bond.GetBondType()))
+                        bond_stereo_info.append(self._normalize_bond_stereo_enum(str(bond.GetStereo())))
                     else:
                         logger.warning(f"[{molecule_id}] RDKit bond index out of range: {i}-{j}")
             except Exception as e:
@@ -1303,6 +1348,7 @@ class FeatureExtractor:
                             if mayer_matrix[i, j] > threshold:
                                 bond_indices.append([i, j])
                                 bond_types.append(None)  # 无 RDKit 类型信息
+                                bond_stereo_info.append("unknown")
                                 mayer_values.append(float(mayer_matrix[i, j]))
                                 wiberg_values.append(float(wiberg_matrix[i, j]))
                 
@@ -1310,8 +1356,20 @@ class FeatureExtractor:
                 builder.set_bond_features(
                     bond_indices=bond_indices,
                     bond_types_rdkit=bond_types if bond_types else [],  # 空键用 []
+                    bond_stereo_info=bond_stereo_info if bond_stereo_info else [],
                     bond_orders_mayer=mayer_values if mayer_values else [],
                     bond_orders_wiberg=wiberg_values if wiberg_values else []
+                )
+                builder.set_bond_metadata(
+                    "bond_stereo_info",
+                    available=bool(bond_stereo_info),
+                    source="rdkit_bond_stereo_perception" if rdkit_pyscf_aligned else "inferred_without_rdkit_stereo",
+                    is_proxy=True,
+                    proxy_note=(
+                        "Proxy stereo field from RDKit perception; exact qcMol stereo semantics may differ."
+                        if rdkit_pyscf_aligned
+                        else "Proxy stereo unavailable without aligned RDKit topology; filled as 'unknown'."
+                    ),
                 )
             except Exception as e:
                 logger.warning(f"[{molecule_id}] Bond order extraction failed: {e}")
@@ -1319,8 +1377,16 @@ class FeatureExtractor:
                 builder.set_bond_features(
                     bond_indices=[],
                     bond_types_rdkit=[],
+                    bond_stereo_info=[],
                     bond_orders_mayer=[],
                     bond_orders_wiberg=[]
+                )
+                builder.set_bond_metadata(
+                    "bond_stereo_info",
+                    available=False,
+                    source="rdkit_bond_stereo_perception",
+                    is_proxy=True,
+                    proxy_note=f"Bond stereo extraction failed: {e}",
                 )
         
         # ============ 步骤 7: 提取 ELF 特征（扩展特征） ============
@@ -1675,6 +1741,22 @@ class FeatureExtractor:
         }
         return periodic_table.get(symbol.capitalize(), 0)
 
+    def _normalize_bond_stereo_enum(self, rdkit_stereo: str) -> str:
+        """
+        统一输出键立体化学枚举值，避免暴露 RDKit 内部对象/数字。
+        Allowed: none | any | cis | trans | e | z | unknown
+        """
+        s = (rdkit_stereo or "").strip().upper()
+        mapping = {
+            "STEREONONE": "none",
+            "STEREOANY": "any",
+            "STEREOCIS": "cis",
+            "STEREOTRANS": "trans",
+            "STEREOE": "e",
+            "STEREOZ": "z",
+        }
+        return mapping.get(s, "unknown")
+
     def save_unified_features(
         self,
         unified_data: Dict[str, Any],
@@ -1776,6 +1858,7 @@ class FeatureExtractor:
             ("bond_orders_mayer", bond_feat.get("bond_orders_mayer")),
             ("bond_orders_wiberg", bond_feat.get("bond_orders_wiberg")),
             ("elf_bond_midpoint", bond_feat.get("elf_bond_midpoint")),
+            ("bond_stereo_info", bond_feat.get("bond_stereo_info")),
         ]
         
         for name, arr in bond_arrays:
@@ -1794,6 +1877,17 @@ class FeatureExtractor:
                 f"expected {n_bonds} (n_bonds)"
             )
             reason_codes.append("bond_feature_length_mismatch_bond_types_rdkit")
+
+        # 3.1 检查 bond_stereo_info 枚举值
+        stereo_values = bond_feat.get("bond_stereo_info")
+        allowed_stereo = {"none", "any", "cis", "trans", "e", "z", "unknown"}
+        if isinstance(stereo_values, list):
+            for idx, val in enumerate(stereo_values):
+                if val not in allowed_stereo:
+                    logger.warning(
+                        f"[{molecule_id}] Invalid bond_stereo_info enum at index {idx}: {val}"
+                    )
+                    reason_codes.append("bond_feature_invalid_enum_bond_stereo_info")
         
         # 4-6. 检查 bond_indices 有效性
         seen_bonds = set()
