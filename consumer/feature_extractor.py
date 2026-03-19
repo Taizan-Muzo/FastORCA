@@ -1288,6 +1288,9 @@ class FeatureExtractor:
                 logger.warning(f"[{molecule_id}] RDKit atom features failed: {e}")
         
         # ============ 步骤 5: 提取波函数原子特征（电荷） ============
+        hirshfeld: Optional[List[float]] = None
+        iao: Optional[List[float]] = None
+        cm5: Optional[List[float]] = None
         if mol is not None and mf is not None:
             try:
                 mulliken = self.extract_mulliken_charges(mol, mf).tolist()
@@ -1303,7 +1306,10 @@ class FeatureExtractor:
             
             try:
                 iao = self.extract_iao_charges(mol, mf).tolist()
-                builder.set_atom_features(charge_iao=iao)
+                builder.set_atom_features(
+                    charge_iao=iao,
+                    atomic_charge_iao_proxy=iao,  # B1 proxy: honest IAO-based charge proxy
+                )
             except Exception as e:
                 logger.warning(f"[{molecule_id}] IAO charges failed: {e}")
         
@@ -1314,6 +1320,7 @@ class FeatureExtractor:
         bond_stereo_info: List[str] = []
         mayer_values: List[float] = []
         wiberg_values: List[float] = []
+        bond_di_proxy_v1: List[float] = []
         
         # 只有在 RDKit/PySCF 原子索引对齐时才使用 RDKit 键拓扑
         if mol_rdkit is not None and rdkit_pyscf_aligned:
@@ -1354,12 +1361,17 @@ class FeatureExtractor:
                                 wiberg_values.append(float(wiberg_matrix[i, j]))
                 
                 # 统一使用空数组 [] 而不是 None（即使是空分子）
+                bond_di_proxy_v1 = self._compute_bond_delocalization_index_proxy_v1(
+                    mayer_values=mayer_values,
+                    wiberg_values=wiberg_values,
+                )
                 builder.set_bond_features(
                     bond_indices=bond_indices,
                     bond_types_rdkit=bond_types if bond_types else [],  # 空键用 []
                     bond_stereo_info=bond_stereo_info if bond_stereo_info else [],
                     bond_orders_mayer=mayer_values if mayer_values else [],
-                    bond_orders_wiberg=wiberg_values if wiberg_values else []
+                    bond_orders_wiberg=wiberg_values if wiberg_values else [],
+                    bond_delocalization_index_proxy_v1=bond_di_proxy_v1,
                 )
                 builder.set_bond_metadata(
                     "bond_stereo_info",
@@ -1380,7 +1392,8 @@ class FeatureExtractor:
                     bond_types_rdkit=[],
                     bond_stereo_info=[],
                     bond_orders_mayer=[],
-                    bond_orders_wiberg=[]
+                    bond_orders_wiberg=[],
+                    bond_delocalization_index_proxy_v1=[],
                 )
                 builder.set_bond_metadata(
                     "bond_stereo_info",
@@ -1442,6 +1455,13 @@ class FeatureExtractor:
                 builder.set_atom_features(charge_cm5=cm5)
             except Exception as e:
                 logger.warning(f"[{molecule_id}] CM5 charges failed: {e}")
+        builder.set_atom_features(
+            atomic_density_partition_charge_proxy={
+                "hirshfeld": hirshfeld,
+                "cm5": cm5,
+                "bader": None,
+            }
+        )
         
         # ============ 步骤 9: 提取 Fock 矩阵（可选） ============
         if save_fock_matrix and mol is not None and mf is not None:
@@ -1488,6 +1508,28 @@ class FeatureExtractor:
                 status = metadata.get("extraction_status", "unknown")
                 if status == "success":
                     logger.success(f"[{molecule_id}] Orbital features extracted: {orbital_features.get('ibo_count')} IBOs")
+                    # B1 proxy: bond orbital localization proxy with frozen candidate rules
+                    bond_orbital_localization_proxy = self._compute_bond_orbital_localization_proxy(
+                        bond_indices=bond_indices,
+                        orbital_features=orbital_features,
+                    )
+                    bond_order_weighted_localization_proxy = self._compute_bond_order_weighted_localization_proxy(
+                        bond_orbital_localization_proxy=bond_orbital_localization_proxy,
+                        bond_delocalization_index_proxy_v1=bond_di_proxy_v1,
+                    )
+                    builder.set_bond_features(
+                        bond_orbital_localization_proxy=bond_orbital_localization_proxy,
+                        bond_order_weighted_localization_proxy=bond_order_weighted_localization_proxy,
+                    )
+
+                    # B1 proxy: atom-level fixed-shape descriptor (4 dimensions per atom)
+                    descriptor_v1 = self._compute_atomic_orbital_descriptor_proxy_v1(
+                        orbital_features=orbital_features,
+                        natm=mol.natm,
+                    )
+                    builder.set_atom_features(
+                        atomic_orbital_descriptor_proxy_v1=descriptor_v1,
+                    )
                 else:
                     reason = metadata.get("failure_reason", "unknown")
                     logger.warning(f"[{molecule_id}] Orbital features soft-fail: {reason}")
@@ -1674,6 +1716,15 @@ class FeatureExtractor:
                         features = critic2_result.features
                         if "qtaim" in features:
                             builder.set_external_features("critic2", features)
+                            bader_charges = features.get("qtaim", {}).get("bader_charges")
+                            current_partition = builder.data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
+                            builder.set_atom_features(
+                                atomic_density_partition_charge_proxy={
+                                    "hirshfeld": current_partition.get("hirshfeld"),
+                                    "cm5": current_partition.get("cm5"),
+                                    "bader": bader_charges,
+                                }
+                            )
                             logger.success(f"[{molecule_id}] Critic2 analysis completed: {features['qtaim'].get('n_bader_volumes', 0)} Bader volumes")
                     else:
                         logger.warning(f"[{molecule_id}] Critic2 soft-fail: {critic2_result.failure_reason}")
@@ -1767,6 +1818,178 @@ class FeatureExtractor:
         }
         return periodic_table.get(symbol.capitalize(), 0)
 
+    def _compute_bond_delocalization_index_proxy_v1(
+        self,
+        mayer_values: List[float],
+        wiberg_values: List[float],
+    ) -> List[float]:
+        """
+        B1 frozen formula:
+        DI_proxy_v1(i,j) = max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))
+        """
+        n = min(len(mayer_values), len(wiberg_values))
+        out: List[float] = []
+        for i in range(n):
+            w = max(0.0, float(wiberg_values[i]))
+            m = max(0.0, float(mayer_values[i]))
+            out.append(float(max(0.0, 0.5 * (w + m))))
+        return out
+
+    def _compute_bond_orbital_localization_proxy(
+        self,
+        bond_indices: List[List[int]],
+        orbital_features: Dict[str, Any],
+    ) -> List[float]:
+        """
+        B1 frozen rules for bonding-candidate IBO:
+        - occupancy_k >= 1.5
+        - c_i >= 0.20
+        - c_j >= 0.20
+        - c_i + c_j >= 0.65
+
+        bond_orbital_localization_proxy(i,j) = max_k(c_i + c_j) over candidates, clipped to [0,1].
+        """
+        contributions = orbital_features.get("ibo_atom_contributions")
+        occupancies = orbital_features.get("ibo_occupancies")
+        if not isinstance(contributions, list) or not isinstance(occupancies, list):
+            return [0.0] * len(bond_indices)
+
+        occ_min = 1.5
+        ci_min = 0.20
+        cj_min = 0.20
+        sum_min = 0.65
+
+        vals: List[float] = []
+        n_orb = min(len(contributions), len(occupancies))
+        for bond in bond_indices:
+            if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+                vals.append(0.0)
+                continue
+            i, j = int(bond[0]), int(bond[1])
+            best = 0.0
+            for k in range(n_orb):
+                contrib_k = contributions[k]
+                if not isinstance(contrib_k, (list, tuple)):
+                    continue
+                if i < 0 or j < 0 or i >= len(contrib_k) or j >= len(contrib_k):
+                    continue
+                occ = float(occupancies[k])
+                ci = float(contrib_k[i])
+                cj = float(contrib_k[j])
+                s = ci + cj
+                if occ >= occ_min and ci >= ci_min and cj >= cj_min and s >= sum_min:
+                    if s > best:
+                        best = s
+            vals.append(float(min(1.0, max(0.0, best))))
+        return vals
+
+    def _compute_bond_order_weighted_localization_proxy(
+        self,
+        bond_orbital_localization_proxy: List[float],
+        bond_delocalization_index_proxy_v1: List[float],
+    ) -> List[float]:
+        """
+        Frozen formula:
+        bond_order_weighted_localization_proxy = bond_orbital_localization_proxy * bond_delocalization_index_proxy_v1
+        """
+        n = min(len(bond_orbital_localization_proxy), len(bond_delocalization_index_proxy_v1))
+        return [
+            float(max(0.0, bond_orbital_localization_proxy[i] * bond_delocalization_index_proxy_v1[i]))
+            for i in range(n)
+        ]
+
+    def _compute_atomic_orbital_descriptor_proxy_v1(
+        self,
+        orbital_features: Dict[str, Any],
+        natm: int,
+    ) -> Dict[str, List[float]]:
+        """
+        Fixed shape per atom (v1):
+        - n_dominant_ibo
+        - sum_ibo_occupancy
+        - mean_localization_score
+        - contribution_entropy
+
+        contribution_entropy definition:
+        For atom A, use distribution over orbitals p_k = c_{kA} / sum_k c_{kA}.
+        entropy_A = -sum_k p_k ln p_k / ln(N_A), where N_A=#orbitals with c_{kA}>0; entropy_A=0 when N_A<=1.
+        """
+        contributions = orbital_features.get("ibo_atom_contributions")
+        occupancies = orbital_features.get("ibo_occupancies")
+        locality = orbital_features.get("orbital_locality_score")
+
+        n_dominant_ibo = [0.0] * natm
+        sum_ibo_occupancy = [0.0] * natm
+        sum_locality = [0.0] * natm
+        count_locality = [0.0] * natm
+        contribution_entropy = [0.0] * natm
+
+        if not isinstance(contributions, list):
+            return {
+                "n_dominant_ibo": n_dominant_ibo,
+                "sum_ibo_occupancy": sum_ibo_occupancy,
+                "mean_localization_score": [0.0] * natm,
+                "contribution_entropy": contribution_entropy,
+            }
+
+        n_orb = len(contributions)
+        occ = occupancies if isinstance(occupancies, list) else [2.0] * n_orb
+        loc = locality if isinstance(locality, list) else [0.0] * n_orb
+        occ = list(occ) + [2.0] * max(0, n_orb - len(occ))
+        loc = list(loc) + [0.0] * max(0, n_orb - len(loc))
+
+        contrib_threshold = 0.20
+        dominant_threshold = 0.50
+
+        # Collect per-atom orbital contribution distribution values (c_{kA})
+        atom_contrib_vectors: List[List[float]] = [[] for _ in range(natm)]
+
+        for k, contrib_k in enumerate(contributions):
+            if not isinstance(contrib_k, (list, tuple)) or len(contrib_k) < natm:
+                continue
+            contrib_k = [float(x) for x in contrib_k[:natm]]
+            max_idx = int(np.argmax(contrib_k))
+            max_val = contrib_k[max_idx]
+            if max_val >= dominant_threshold:
+                n_dominant_ibo[max_idx] += 1.0
+
+            for a in range(natm):
+                ca = contrib_k[a]
+                atom_contrib_vectors[a].append(ca)
+                if ca >= contrib_threshold:
+                    sum_ibo_occupancy[a] += float(occ[k])
+                    sum_locality[a] += float(loc[k])
+                    count_locality[a] += 1.0
+
+        mean_localization = []
+        for a in range(natm):
+            if count_locality[a] > 0:
+                mean_localization.append(float(sum_locality[a] / count_locality[a]))
+            else:
+                mean_localization.append(0.0)
+
+        # Frozen entropy on p_k distribution built from c_{kA}
+        for a in range(natm):
+            vec = np.array([v for v in atom_contrib_vectors[a] if v > 0.0], dtype=float)
+            n_active = len(vec)
+            if n_active <= 1:
+                contribution_entropy[a] = 0.0
+                continue
+            total = float(np.sum(vec))
+            if total <= 1e-12:
+                contribution_entropy[a] = 0.0
+                continue
+            p = vec / total
+            h = -float(np.sum(p * np.log(p + 1e-12)))
+            contribution_entropy[a] = float(h / np.log(float(n_active)))
+
+        return {
+            "n_dominant_ibo": [float(x) for x in n_dominant_ibo],
+            "sum_ibo_occupancy": [float(x) for x in sum_ibo_occupancy],
+            "mean_localization_score": [float(x) for x in mean_localization],
+            "contribution_entropy": [float(x) for x in contribution_entropy],
+        }
+
     def _normalize_bond_stereo_enum(self, rdkit_stereo: str) -> str:
         """
         统一输出键立体化学枚举值，避免暴露 RDKit 内部对象/数字。
@@ -1853,6 +2076,7 @@ class FeatureExtractor:
             ("charge_hirshfeld", atom_feat.get("charge_hirshfeld")),
             ("charge_cm5", atom_feat.get("charge_cm5")),
             ("charge_iao", atom_feat.get("charge_iao")),
+            ("atomic_charge_iao_proxy", atom_feat.get("atomic_charge_iao_proxy")),
             ("elf_value", atom_feat.get("elf_value")),
         ]
         
@@ -1863,6 +2087,30 @@ class FeatureExtractor:
                     f"expected {natm} (natm)"
                 )
                 reason_codes.append(f"atom_feature_length_mismatch_{name}")
+
+        # 1.1 检查 atomic_density_partition_charge_proxy 子字段长度
+        charge_partition = atom_feat.get("atomic_density_partition_charge_proxy")
+        if isinstance(charge_partition, dict):
+            for sub in ["hirshfeld", "cm5", "bader"]:
+                arr = charge_partition.get(sub)
+                if isinstance(arr, list) and len(arr) != natm:
+                    logger.warning(
+                        f"[{molecule_id}] Length mismatch: atomic_density_partition_charge_proxy.{sub} "
+                        f"has {len(arr)} elements, expected {natm} (natm)"
+                    )
+                    reason_codes.append(f"atom_feature_length_mismatch_atomic_density_partition_charge_proxy_{sub}")
+
+        # 1.2 检查 atomic_orbital_descriptor_proxy_v1 固定 shape
+        descriptor = atom_feat.get("atomic_orbital_descriptor_proxy_v1")
+        if isinstance(descriptor, dict):
+            for sub in ["n_dominant_ibo", "sum_ibo_occupancy", "mean_localization_score", "contribution_entropy"]:
+                arr = descriptor.get(sub)
+                if isinstance(arr, list) and len(arr) != natm:
+                    logger.warning(
+                        f"[{molecule_id}] Length mismatch: atomic_orbital_descriptor_proxy_v1.{sub} "
+                        f"has {len(arr)} elements, expected {natm} (natm)"
+                    )
+                    reason_codes.append(f"atom_feature_length_mismatch_atomic_orbital_descriptor_proxy_v1_{sub}")
         
         # 检查键特征
         bond_feat = data["bond_features"]
@@ -1885,6 +2133,9 @@ class FeatureExtractor:
             ("bond_orders_wiberg", bond_feat.get("bond_orders_wiberg")),
             ("elf_bond_midpoint", bond_feat.get("elf_bond_midpoint")),
             ("bond_stereo_info", bond_feat.get("bond_stereo_info")),
+            ("bond_delocalization_index_proxy_v1", bond_feat.get("bond_delocalization_index_proxy_v1")),
+            ("bond_orbital_localization_proxy", bond_feat.get("bond_orbital_localization_proxy")),
+            ("bond_order_weighted_localization_proxy", bond_feat.get("bond_order_weighted_localization_proxy")),
         ]
         
         for name, arr in bond_arrays:

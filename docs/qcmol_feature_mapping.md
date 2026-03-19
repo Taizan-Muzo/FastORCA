@@ -25,10 +25,10 @@
 | LI values | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.li_values`, `needs_exact_qcmol_name`) | external/manual review |
 | ADCH charges | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.adch_charges`) | external (Multiwfn) |
 | NBO-LP | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.nbo_lp`) | external (NBO/Multiwfn) |
-| NPA | atom_features | implemented_proxy (IAO charge proxy) | existing code + external (NBO) |
+| NPA | atom_features | implemented_proxy (`atom_features.atomic_charge_iao_proxy`) | existing code (IAO) |
 | NPA (exact) | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.npa_exact`) | external (NBO/Multiwfn) |
 | stereo info | bond_features | implemented_proxy (`bond_features.bond_stereo_info`) | existing code (RDKit) |
-| DI values / DI matrix | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.di_values_or_matrix`, `needs_exact_qcmol_name`) | external/manual review |
+| DI values / DI matrix | bond_features | implemented_proxy (`bond_features.bond_delocalization_index_proxy_v1`, `needs_exact_qcmol_name`) | existing code (Mayer/Wiberg proxy v1) |
 | ELF values | bond_features | implemented_exact (`bond_features.elf_bond_midpoint`) | existing code |
 | NBO-BD | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.nbo_bd`) | external (NBO/Multiwfn) |
 | LBO | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.lbo`) | external/manual review |
@@ -41,6 +41,27 @@
 - `needs_exact_qcmol_name` has been added in schema mapping for terms where paper abbreviation/wording must be locked before implementation.
 - Allowed status levels in this table: `implemented_exact / implemented_proxy / partial / missing`.
 - This file is a working contract for M5.5 naming convergence; do not rename unknown terms without paper-exact confirmation.
+
+## B1 Proxy Fields (Open-Source)
+
+- `atom_features.atomic_charge_iao_proxy`
+- `atom_features.atomic_density_partition_charge_proxy = {hirshfeld, cm5, bader}`
+- `bond_features.bond_delocalization_index_proxy_v1`
+- `bond_features.bond_orbital_localization_proxy`
+- `bond_features.bond_order_weighted_localization_proxy`
+- `atom_features.atomic_orbital_descriptor_proxy_v1`
+
+Frozen formulas/constraints:
+- `bond_delocalization_index_proxy_v1(i,j) = max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))`
+- `bond_orbital_localization_proxy` candidate IBO rules:
+  - occupancy >= 1.5
+  - c_i >= 0.20
+  - c_j >= 0.20
+  - c_i + c_j >= 0.65
+- `bond_order_weighted_localization_proxy = bond_orbital_localization_proxy * bond_delocalization_index_proxy_v1`
+- `atomic_orbital_descriptor_proxy_v1.contribution_entropy`:
+  - For atom A, `p_k = c_{kA}/sum_k c_{kA}`
+  - `H_A = -sum_k p_k ln p_k / ln(N_A)` where `N_A` is number of orbitals with `c_{kA}>0`
 
 ## External Bridge Contract
 

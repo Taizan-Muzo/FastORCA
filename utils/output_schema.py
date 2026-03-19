@@ -118,14 +118,14 @@ class UnifiedOutputBuilder:
                     },
                     "ADCH_charges": {"mapped_path": "external_bridge_roadmap.atom_level.adch_charges", "status": "missing"},
                     "NBO_LP": {"mapped_path": "external_bridge_roadmap.atom_level.nbo_lp", "status": "missing"},
-                    "NPA": {"mapped_path": "atom_features.charge_iao", "status": "implemented_proxy"},
+                    "NPA": {"mapped_path": "atom_features.atomic_charge_iao_proxy", "status": "implemented_proxy"},
                     "NPA_exact": {"mapped_path": "external_bridge_roadmap.atom_level.npa_exact", "status": "missing"},
                 },
                 "bond_features": {
                     "stereo_info": {"mapped_path": "bond_features.bond_stereo_info", "status": "implemented_proxy"},
                     "DI_values_or_matrix": {
-                        "mapped_path": "external_bridge_roadmap.bond_level.di_values_or_matrix",
-                        "status": "missing",
+                        "mapped_path": "bond_features.bond_delocalization_index_proxy_v1",
+                        "status": "implemented_proxy",
                         "needs_exact_qcmol_name": True,  # DI metric definition/name must follow qcMol exact term
                     },
                     "ELF_values": {"mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented_exact"},
@@ -188,7 +188,30 @@ class UnifiedOutputBuilder:
                 "charge_hirshfeld": None,
                 "charge_cm5": None,
                 "charge_iao": None,
-                "elf_value": None
+                "elf_value": None,
+                "atomic_charge_iao_proxy": None,
+                "atomic_density_partition_charge_proxy": {
+                    "hirshfeld": None,
+                    "cm5": None,
+                    "bader": None,
+                },
+                "atomic_orbital_descriptor_proxy_v1": {
+                    "n_dominant_ibo": None,
+                    "sum_ibo_occupancy": None,
+                    "mean_localization_score": None,
+                    "contribution_entropy": None,
+                },
+                "atomic_orbital_descriptor_proxy_v1_metadata": {
+                    "version": "v1",
+                    "shape_per_atom": [
+                        "n_dominant_ibo",
+                        "sum_ibo_occupancy",
+                        "mean_localization_score",
+                        "contribution_entropy",
+                    ],
+                    "contribution_entropy_definition": "For atom A, p_k = c_{kA} / sum_k c_{kA}; entropy = -sum_k p_k ln p_k / ln(N_A), with N_A=number of orbitals where c_{kA}>0 and entropy=0 when N_A<=1.",
+                    "dominant_ibo_definition": "Atom A is dominant for orbital k if c_{kA} is the largest atomic contribution in orbital k.",
+                },
             },
             
             "bond_features": {
@@ -198,6 +221,9 @@ class UnifiedOutputBuilder:
                 "bond_orders_mayer": None,
                 "bond_orders_wiberg": None,
                 "elf_bond_midpoint": None,
+                "bond_delocalization_index_proxy_v1": None,
+                "bond_orbital_localization_proxy": None,
+                "bond_order_weighted_localization_proxy": None,
                 "metadata": {
                     "bond_stereo_info": {
                         "available": False,
@@ -205,7 +231,26 @@ class UnifiedOutputBuilder:
                         "is_proxy": True,
                         "proxy_note": None,
                         "enum_values": ["none", "any", "cis", "trans", "e", "z", "unknown"],
-                    }
+                    },
+                    "bond_delocalization_index_proxy_v1": {
+                        "formula": "max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))",
+                        "version": "v1",
+                        "is_proxy": True,
+                    },
+                    "bond_orbital_localization_proxy": {
+                        "formula": "max_k(c_{k,i}+c_{k,j}) over bonding-candidate IBOs",
+                        "ibo_candidate_rules": {
+                            "occupancy_min": 1.5,
+                            "ci_min": 0.20,
+                            "cj_min": 0.20,
+                            "ci_plus_cj_min": 0.65,
+                        },
+                        "is_proxy": True,
+                    },
+                    "bond_order_weighted_localization_proxy": {
+                        "formula": "bond_orbital_localization_proxy * bond_delocalization_index_proxy_v1",
+                        "is_proxy": True,
+                    },
                 }
             },
 
