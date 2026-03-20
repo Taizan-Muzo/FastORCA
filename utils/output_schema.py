@@ -93,8 +93,12 @@ class UnifiedOutputBuilder:
                     "dipole_moment": {"mapped_path": "global_features.dft.dipole_moment_debye", "status": "implemented_exact"},
                     "isosurface_area": {"mapped_path": "realspace_features.density_isosurface_area", "status": "implemented_exact"},
                     "isosurface_volume": {"mapped_path": "realspace_features.density_isosurface_volume", "status": "implemented_exact"},
-                    "sphericity_parameters": {"mapped_path": "realspace_features.density_sphericity_like", "status": "implemented_exact"},
-                    "molecule_size": {"mapped_path": "global_features.rdkit.heavy_atom_count", "status": "partial"},
+                    "sphericity_parameters": {"mapped_path": "realspace_features.density_sphericity_like", "status": "implemented_proxy"},
+                    "molecule_size": {
+                        "mapped_path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
+                        "status": "implemented_proxy",
+                        "notes": "Open-source frozen definition: 3D bounding-box diagonal from geometry coordinates.",
+                    },
                     "molecular_weight": {"mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented_exact"},
                     "ionization_affinity_or_related": {
                         "mapped_path": "global_features.dft.homo_energy_hartree",
@@ -176,6 +180,107 @@ class UnifiedOutputBuilder:
                     "h_bond_acceptors": None,
                     "rotatable_bonds": None,
                     "heavy_atom_count": None
+                },
+                "geometry_size": {
+                    "bounding_box_diagonal_angstrom": None,
+                    "heavy_atom_count_proxy": None
+                },
+                "metadata": {
+                    "homo_lumo_gap_hartree": {
+                        "canonical_path": "global_features.dft.homo_lumo_gap_hartree",
+                        "definition_version": "v1",
+                        "units": "hartree",
+                        "formula": "E_LUMO - E_HOMO",
+                        "implementation_status": "implemented_exact",
+                        "is_proxy": False,
+                        "source": "pyscf_mo_energies",
+                        "limitations": []
+                    },
+                    "dipole_moment_debye": {
+                        "canonical_path": "global_features.dft.dipole_moment_debye",
+                        "definition_version": "v1",
+                        "units": "debye",
+                        "formula": "||dipole_vector_debye||_2",
+                        "implementation_status": "implemented_exact",
+                        "is_proxy": False,
+                        "source": "pyscf_dipole_moment",
+                        "limitations": []
+                    },
+                    "isosurface_area_angstrom2": {
+                        "canonical_path": "realspace_features.density_isosurface_area",
+                        "definition_version": "v1",
+                        "units": "angstrom^2",
+                        "implementation_status": "implemented_exact",
+                        "is_proxy": False,
+                        "source": "realspace_density_isosurface",
+                        "limitations": [
+                            "requires realspace_features extraction success"
+                        ]
+                    },
+                    "isosurface_volume_angstrom3": {
+                        "canonical_path": "realspace_features.density_isosurface_volume",
+                        "definition_version": "v1",
+                        "units": "angstrom^3",
+                        "implementation_status": "implemented_exact",
+                        "is_proxy": False,
+                        "source": "realspace_density_isosurface",
+                        "limitations": [
+                            "requires realspace_features extraction success"
+                        ]
+                    },
+                    "sphericity_like_dimensionless": {
+                        "canonical_path": "realspace_features.density_sphericity_like",
+                        "definition_version": "v1",
+                        "units": "dimensionless",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "realspace_density_shape_proxy",
+                        "limitations": [
+                            "proxy shape descriptor; not a paper-exact sphericity index"
+                        ]
+                    },
+                    "molecule_size_bounding_box_diagonal_angstrom": {
+                        "canonical_path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
+                        "definition_version": "v1",
+                        "units": "angstrom",
+                        "formula": "sqrt((x_max-x_min)^2 + (y_max-y_min)^2 + (z_max-z_min)^2)",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "geometry.atom_coords_angstrom",
+                        "limitations": [
+                            "orientation-dependent geometric extent",
+                            "not equivalent to exact qcMol molecule-size definition"
+                        ]
+                    },
+                    "molecule_size_heavy_atom_count_proxy": {
+                        "canonical_path": "global_features.geometry_size.heavy_atom_count_proxy",
+                        "definition_version": "v1",
+                        "units": "count",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "rdkit_heavy_atom_count_or_geometry_symbols",
+                        "limitations": [
+                            "topology/count proxy, not a 3D size metric"
+                        ]
+                    },
+                    "molecular_weight_g_mol": {
+                        "canonical_path": "global_features.rdkit.molecular_weight",
+                        "definition_version": "v1",
+                        "units": "g/mol",
+                        "implementation_status": "implemented_exact",
+                        "is_proxy": False,
+                        "source": "rdkit_mol_weight",
+                        "limitations": []
+                    },
+                    "total_charge_e": {
+                        "canonical_path": "molecule_info.charge",
+                        "definition_version": "v1",
+                        "units": "e",
+                        "implementation_status": "implemented_exact",
+                        "is_proxy": False,
+                        "source": "pyscf_molecule_charge",
+                        "limitations": []
+                    }
                 }
             },
             
@@ -203,7 +308,34 @@ class UnifiedOutputBuilder:
                     "contribution_entropy": None,
                 },
                 "metadata": {
+                    "atomic_charge_iao_proxy": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "units": "e",
+                        "source": "pyscf_iao_population",
+                        "formula": "atomic_number - IAO_population",
+                        "limitations": [
+                            "open-source IAO proxy; not equivalent to exact NPA"
+                        ]
+                    },
+                    "atomic_density_partition_charge_proxy": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "units": "e",
+                        "field_order": ["hirshfeld", "cm5", "bader"],
+                        "sources": {
+                            "hirshfeld": "pyscf_hirshfeld",
+                            "cm5": "hirshfeld_plus_cm5_correction",
+                            "bader": "external_features.critic2.qtaim.bader_charges"
+                        },
+                        "limitations": [
+                            "bader field may be null when external bridge is not executed"
+                        ]
+                    },
                     "atomic_lone_pair_heuristic_proxy": {
+                        "is_proxy": True,
                         "is_heuristic": True,
                         "equivalent_to_nbo_lp": False,
                         "definition_version": "v1",
@@ -222,6 +354,8 @@ class UnifiedOutputBuilder:
                         ],
                     },
                     "atomic_orbital_descriptor_proxy_v1": {
+                        "is_proxy": True,
+                        "is_heuristic": False,
                         "field_order": [
                             "n_dominant_ibo",
                             "sum_ibo_occupancy",
@@ -263,10 +397,15 @@ class UnifiedOutputBuilder:
                     },
                     "bond_delocalization_index_proxy_v1": {
                         "formula": "max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))",
-                        "version": "v1",
+                        "definition_version": "v1",
                         "is_proxy": True,
+                        "is_heuristic": False,
+                        "limitations": [
+                            "proxy DI definition based on Mayer/Wiberg bond orders"
+                        ],
                     },
                     "bond_orbital_localization_proxy": {
+                        "definition_version": "v1",
                         "formula": "max_k(c_{k,i}+c_{k,j}) over bonding-candidate IBOs",
                         "ibo_candidate_rules": {
                             "occupancy_min": 1.5,
@@ -275,10 +414,19 @@ class UnifiedOutputBuilder:
                             "ci_plus_cj_min": 0.65,
                         },
                         "is_proxy": True,
+                        "is_heuristic": True,
+                        "limitations": [
+                            "depends on occupied IBO extraction and heuristic candidate rules"
+                        ],
                     },
                     "bond_order_weighted_localization_proxy": {
+                        "definition_version": "v1",
                         "formula": "bond_orbital_localization_proxy * bond_delocalization_index_proxy_v1",
                         "is_proxy": True,
+                        "is_heuristic": True,
+                        "limitations": [
+                            "composite proxy from localization and DI proxies"
+                        ],
                     },
                 }
             },
@@ -288,6 +436,8 @@ class UnifiedOutputBuilder:
                     "available": False,
                     "source": None,
                     "is_proxy": None,
+                    "definition_version": "v1",
+                    "proxy_family": "semantic_reference",
                     "coordinate_ref": "geometry.atom_coords_angstrom",
                     "semantics": "reference_to_current_working_geometry",
                     "proxy_note": None,
@@ -296,6 +446,8 @@ class UnifiedOutputBuilder:
                 "most_stable_conformation": {
                     "available": False,
                     "is_proxy": True,
+                    "definition_version": "v1",
+                    "proxy_family": "rdkit_forcefield_conformer_search",
                     "conformer_id": None,
                     "conformer_generation_method": None,
                     "selection_method": None,
@@ -596,6 +748,22 @@ class UnifiedOutputBuilder:
         for key, value in kwargs.items():
             if key in self.data["global_features"]["rdkit"]:
                 self.data["global_features"]["rdkit"][key] = value
+        return self
+
+    def set_global_geometry_size(self, **kwargs) -> "UnifiedOutputBuilder":
+        """设置 geometry-dependent 分子尺寸特征"""
+        for key, value in kwargs.items():
+            if key in self.data["global_features"]["geometry_size"]:
+                self.data["global_features"]["geometry_size"][key] = value
+        return self
+
+    def set_global_metadata(self, feature: str, **kwargs) -> "UnifiedOutputBuilder":
+        """设置 global_features.metadata 下某个 canonical 特征的 metadata"""
+        meta = self.data["global_features"].get("metadata", {})
+        if feature in meta and isinstance(meta[feature], dict):
+            for key, value in kwargs.items():
+                if key in meta[feature]:
+                    meta[feature][key] = value
         return self
     
     def set_atom_features(self, **kwargs) -> "UnifiedOutputBuilder":

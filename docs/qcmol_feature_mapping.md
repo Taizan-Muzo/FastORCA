@@ -14,8 +14,8 @@
 | dipole moment | global_features | implemented_exact (`global_features.dft.dipole_moment_debye`) | existing code (PySCF) |
 | isosurface area | global_features | implemented_exact (`realspace_features.density_isosurface_area`) | existing code |
 | isosurface volume | global_features | implemented_exact (`realspace_features.density_isosurface_volume`) | existing code |
-| sphericity parameters | global_features | implemented_exact (`realspace_features.density_sphericity_like`) | existing code |
-| molecule size | global_features | partial (currently heavy atom count proxy) | existing code + definition freeze |
+| sphericity parameters | global_features | implemented_proxy (`realspace_features.density_sphericity_like`) | existing code |
+| molecule size | global_features | implemented_proxy (`global_features.geometry_size.bounding_box_diagonal_angstrom`) | existing code (geometry-based frozen definition) |
 | molecular weight | global_features | implemented_exact (`global_features.rdkit.molecular_weight`) | existing code (RDKit) |
 | ionization affinity / ionization-related quantity | global_features | partial (`needs_exact_qcmol_name`, currently HOMO proxy) | PySCF + manual review |
 | charge | global_features | implemented_exact (`molecule_info.charge`) | existing code |
@@ -71,6 +71,33 @@
   - `random_seed` is persisted for ETKDG reproducibility
   - candidate count strategy (B3.1): `n_requested = clamp(4 + 3*rotatable_bonds, 4, 24)`
   - energy dedup threshold uses forcefield native energy units (`energy_dedup_threshold = 1e-4`)
+
+## Global Canonical Paths (Frozen v1)
+
+| canonical feature | canonical path in unified schema | units | implementation status |
+|---|---|---|---|
+| HOMO-LUMO gap | `global_features.dft.homo_lumo_gap_hartree` | hartree | implemented_exact |
+| dipole moment | `global_features.dft.dipole_moment_debye` | debye | implemented_exact |
+| isosurface area | `realspace_features.density_isosurface_area` | angstrom^2 | implemented_exact |
+| isosurface volume | `realspace_features.density_isosurface_volume` | angstrom^3 | implemented_exact |
+| sphericity-like | `realspace_features.density_sphericity_like` | dimensionless | implemented_proxy |
+| molecule size (primary) | `global_features.geometry_size.bounding_box_diagonal_angstrom` | angstrom | implemented_proxy |
+| molecule size (auxiliary) | `global_features.geometry_size.heavy_atom_count_proxy` | count | implemented_proxy |
+| molecular weight | `global_features.rdkit.molecular_weight` | g/mol | implemented_exact |
+| total charge | `molecule_info.charge` | e | implemented_exact |
+
+## Proxy/Structural Metadata Freeze (v1)
+
+Objects with frozen metadata contract:
+- `atom_features.metadata.atomic_charge_iao_proxy`
+- `atom_features.metadata.atomic_density_partition_charge_proxy`
+- `bond_features.metadata.bond_delocalization_index_proxy_v1`
+- `bond_features.metadata.bond_orbital_localization_proxy`
+- `bond_features.metadata.bond_order_weighted_localization_proxy`
+- `atom_features.metadata.atomic_orbital_descriptor_proxy_v1`
+- `atom_features.metadata.atomic_lone_pair_heuristic_proxy`
+- `structural_features.optimized_3d_geometry` (semantic metadata in-object)
+- `structural_features.most_stable_conformation` (selection metadata in-object)
 
 Frozen formulas/constraints:
 - `bond_delocalization_index_proxy_v1(i,j) = max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))`

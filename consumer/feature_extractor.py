@@ -1193,10 +1193,25 @@ class FeatureExtractor:
                 point_group=self._detect_point_group(mol)
             )
 
+            # 冻结 molecule_size 主定义（B3.2 / qcMol gap closure）：
+            # 主字段 = 3D 包围盒对角线（angstrom）；辅助字段 = heavy_atom_count_proxy。
+            bbox_diag = self._compute_bounding_box_diagonal_angstrom(mol)
+            heavy_atom_count_proxy = builder.data.get("global_features", {}).get("rdkit", {}).get("heavy_atom_count")
+            if heavy_atom_count_proxy is None:
+                heavy_atom_count_proxy = int(
+                    sum(1 for i in range(mol.natm) if str(mol.atom_symbol(i)).upper() != "H")
+                )
+            builder.set_global_geometry_size(
+                bounding_box_diagonal_angstrom=bbox_diag,
+                heavy_atom_count_proxy=int(heavy_atom_count_proxy),
+            )
+
             optimized_geometry_semantic = {
                 "available": True,
                 "source": "wavefunction_geometry",
                 "is_proxy": None,
+                "definition_version": "v1",
+                "proxy_family": "semantic_reference",
                 "coordinate_ref": "geometry.atom_coords_angstrom",
                 "semantics": "reference_to_current_working_geometry",
                 "proxy_note": None,
@@ -1853,6 +1868,8 @@ class FeatureExtractor:
         return {
             "available": False,
             "is_proxy": True,
+            "definition_version": "v1",
+            "proxy_family": "rdkit_forcefield_conformer_search",
             "conformer_id": None,
             "conformer_generation_method": conformer_generation_method,
             "selection_method": selection_method,
@@ -2044,6 +2061,8 @@ class FeatureExtractor:
             return {
                 "available": True,
                 "is_proxy": True,
+                "definition_version": "v1",
+                "proxy_family": "rdkit_forcefield_conformer_search",
                 "conformer_id": int(best_cid),
                 "conformer_generation_method": conformer_generation_method,
                 "selection_method": selection_method,
@@ -2084,6 +2103,23 @@ class FeatureExtractor:
             return point_group
         except Exception:
             return "C1"
+
+    def _compute_bounding_box_diagonal_angstrom(self, mol: gto.Mole) -> Optional[float]:
+        """
+        计算 3D 包围盒对角线长度（angstrom）。
+        公式:
+        sqrt((x_max-x_min)^2 + (y_max-y_min)^2 + (z_max-z_min)^2)
+        """
+        try:
+            coords = np.asarray(mol.atom_coords(unit='A'), dtype=float)
+            if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[1] != 3:
+                return None
+            cmin = np.min(coords, axis=0)
+            cmax = np.max(coords, axis=0)
+            diag = float(np.linalg.norm(cmax - cmin))
+            return diag
+        except Exception:
+            return None
     
     def _symbol_to_atomic_num(self, symbol: str) -> int:
         """元素符号转原子序数"""
