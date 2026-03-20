@@ -1927,12 +1927,15 @@ class FeatureExtractor:
                 params = AllChem.ETKDG()
                 conformer_generation_method = "rdkit_etkdg"
             params.randomSeed = int(random_seed)
-            params.pruneRmsThresh = 0.1
+            # B3.1a: disable ETKDG internal pruning to preserve embedding breadth.
+            # We keep lightweight downstream pruning via energy-dedup.
+            params.pruneRmsThresh = -1.0
             params.useRandomCoords = True
+            params.numThreads = 0
 
             conf_ids = list(AllChem.EmbedMultipleConfs(mol_work, numConfs=int(n_requested), params=params))
-            n_generated = len(conf_ids)
-            if n_generated == 0:
+            n_embedded = len(conf_ids)
+            if n_embedded == 0:
                 return self._default_most_stable_conformation_proxy(
                     random_seed=random_seed,
                     source=conformer_generation_method,
@@ -1983,7 +1986,7 @@ class FeatureExtractor:
                     source="rdkit_forcefield_ranking",
                     proxy_note="Conformers were generated but force-field optimization/ranking failed.",
                     n_conformers_requested=n_requested,
-                    n_conformers_generated=n_generated,
+                    n_conformers_generated=n_embedded,
                     n_conformers_optimized=0,
                     n_conformers_ranked=0,
                     conformer_generation_method=conformer_generation_method,
@@ -2010,7 +2013,7 @@ class FeatureExtractor:
                     source="rdkit_forcefield_ranking",
                     proxy_note="Conformers were optimized but filtered out during energy deduplication.",
                     n_conformers_requested=n_requested,
-                    n_conformers_generated=n_generated,
+                    n_conformers_generated=n_embedded,
                     n_conformers_optimized=n_optimized,
                     n_conformers_ranked=0,
                     conformer_generation_method=conformer_generation_method,
@@ -2027,8 +2030,17 @@ class FeatureExtractor:
                 "force-field ranking only (MMFF94/UFF), not quantum free-energy ranking",
                 "energy dedup uses forcefield native energy units",
             ]
-            if n_generated <= 1:
+            if n_embedded <= 1:
                 limitations.append("candidate set may be very small (<=1 generated conformer)")
+
+            # B3.1a debug counters (schema unchanged):
+            # embedded == n_conformers_generated (post-EmbedMultipleConfs count)
+            # after_pruning == n_conformers_ranked (after energy dedup)
+            logger.info(
+                f"[{molecule_id}] conformer_search_counts: "
+                f"requested={n_requested}, embedded={n_embedded}, "
+                f"after_pruning={n_ranked}, optimized={n_optimized}, ranked={n_ranked}"
+            )
             return {
                 "available": True,
                 "is_proxy": True,
@@ -2037,7 +2049,7 @@ class FeatureExtractor:
                 "selection_method": selection_method,
                 "selection_scope": "lowest-energy conformer within generated+optimized candidate set of current run",
                 "n_conformers_requested": int(n_requested),
-                "n_conformers_generated": int(n_generated),
+                "n_conformers_generated": int(n_embedded),
                 "n_conformers_optimized": int(n_optimized),
                 "n_conformers_ranked": int(n_ranked),
                 "forcefield_used": forcefield_used,
