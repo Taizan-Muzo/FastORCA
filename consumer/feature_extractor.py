@@ -1227,7 +1227,6 @@ class FeatureExtractor:
             most_stable_conf = self._compute_most_stable_conformation_rdkit(
                 mol_rdkit=mol_rdkit,
                 random_seed=20260319,
-                max_conformers=20,
                 molecule_id=molecule_id,
             )
             builder.set_structural_features(
@@ -1838,37 +1837,62 @@ class FeatureExtractor:
         random_seed: int,
         source: str,
         proxy_note: str,
+        n_conformers_requested: int = 0,
         n_conformers_generated: int = 0,
         n_conformers_optimized: int = 0,
+        n_conformers_ranked: int = 0,
+        conformer_generation_method: Optional[str] = "rdkit_etkdg_v3",
         selection_method: Optional[str] = None,
+        forcefield_used: Optional[str] = None,
         ranking_energy_type: Optional[str] = None,
         ranking_energy_value: Optional[float] = None,
+        duplicate_filter_applied: bool = False,
+        energy_dedup_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """构建 most_stable_conformation 的默认 proxy 结构。"""
         return {
             "available": False,
             "is_proxy": True,
             "conformer_id": None,
+            "conformer_generation_method": conformer_generation_method,
             "selection_method": selection_method,
             "selection_scope": "lowest-energy conformer within generated+optimized candidate set of current run",
+            "n_conformers_requested": int(n_conformers_requested),
             "n_conformers_generated": int(n_conformers_generated),
             "n_conformers_optimized": int(n_conformers_optimized),
+            "n_conformers_ranked": int(n_conformers_ranked),
+            "forcefield_used": forcefield_used,
             "ranking_energy_type": ranking_energy_type,
             "ranking_energy_value": ranking_energy_value,
+            "ranking_energy_unit": "forcefield_native_energy_units",
+            "duplicate_filter_applied": bool(duplicate_filter_applied),
+            "energy_dedup_threshold": energy_dedup_threshold,
+            "energy_dedup_threshold_unit": "forcefield_native_energy_units",
             "random_seed": int(random_seed),
             "source": source,
             "proxy_note": proxy_note,
             "limitations": [
                 "not guaranteed to be global most stable conformation",
                 "force-field ranking only (MMFF94 or UFF), not quantum-level conformer free-energy ranking",
+                "energy dedup uses forcefield native energy units",
             ],
         }
+
+    def _choose_light_conformer_count(self, mol_rdkit: Chem.Mol) -> int:
+        """
+        B3.1 轻量构象候选数策略:
+        n = clamp(4 + 3 * rotatable_bonds, 4, 24)
+        """
+        try:
+            n_rot = int(Lipinski.NumRotatableBonds(mol_rdkit))
+        except Exception:
+            n_rot = 0
+        return int(max(4, min(24, 4 + 3 * n_rot)))
 
     def _compute_most_stable_conformation_rdkit(
         self,
         mol_rdkit: Optional[Chem.Mol],
         random_seed: int = 20260319,
-        max_conformers: int = 20,
         molecule_id: str = "",
     ) -> Dict[str, Any]:
         """
@@ -1880,6 +1904,7 @@ class FeatureExtractor:
                 random_seed=random_seed,
                 source="rdkit_molecule_unavailable",
                 proxy_note="RDKit molecule unavailable; conformer search was not attempted.",
+                conformer_generation_method="rdkit_etkdg_v3",
             )
 
         try:
@@ -1889,36 +1914,49 @@ class FeatureExtractor:
                     random_seed=random_seed,
                     source="rdkit_molecule_copy_failed",
                     proxy_note="RDKit molecule copy failed; conformer search was not attempted.",
+                    conformer_generation_method="rdkit_etkdg_v3",
                 )
+
+            n_requested = self._choose_light_conformer_count(mol_work)
+            energy_dedup_threshold = 1e-4  # forcefield native energy units
 
             try:
                 params = AllChem.ETKDGv3()
+                conformer_generation_method = "rdkit_etkdg_v3"
             except Exception:
                 params = AllChem.ETKDG()
+                conformer_generation_method = "rdkit_etkdg"
             params.randomSeed = int(random_seed)
-            params.pruneRmsThresh = 0.2
+            params.pruneRmsThresh = 0.1
+            params.useRandomCoords = True
 
-            conf_ids = list(AllChem.EmbedMultipleConfs(mol_work, numConfs=int(max_conformers), params=params))
+            conf_ids = list(AllChem.EmbedMultipleConfs(mol_work, numConfs=int(n_requested), params=params))
             n_generated = len(conf_ids)
             if n_generated == 0:
                 return self._default_most_stable_conformation_proxy(
                     random_seed=random_seed,
-                    source="rdkit_etkdg_v3",
+                    source=conformer_generation_method,
                     proxy_note="Conformer generation returned zero conformers.",
+                    n_conformers_requested=n_requested,
                     n_conformers_generated=0,
                     n_conformers_optimized=0,
-                    selection_method="rdkit_etkdg_v3 + forcefield_min_energy",
+                    n_conformers_ranked=0,
+                    conformer_generation_method=conformer_generation_method,
+                    selection_method=f"{conformer_generation_method} + forcefield_min_energy",
+                    energy_dedup_threshold=energy_dedup_threshold,
                 )
 
             energies: Dict[int, float] = {}
             ranking_energy_type: Optional[str] = None
-            selection_method = "rdkit_etkdg_v3 + forcefield_min_energy"
+            forcefield_used: Optional[str] = None
+            selection_method = f"{conformer_generation_method} + forcefield_min_energy"
 
             # First choice: MMFF94
             mmff_props = AllChem.MMFFGetMoleculeProperties(mol_work, mmffVariant="MMFF94")
             if mmff_props is not None:
                 ranking_energy_type = "mmff94_energy"
-                selection_method = "rdkit_etkdg_v3 + mmff94_min_energy"
+                forcefield_used = "MMFF94"
+                selection_method = f"{conformer_generation_method} + mmff94_min_energy"
                 for cid in conf_ids:
                     ff = AllChem.MMFFGetMoleculeForceField(mol_work, mmff_props, confId=int(cid))
                     if ff is None:
@@ -1929,7 +1967,8 @@ class FeatureExtractor:
             # Fallback: UFF
             if not energies:
                 ranking_energy_type = "uff_energy"
-                selection_method = "rdkit_etkdg_v3 + uff_min_energy_fallback"
+                forcefield_used = "UFF"
+                selection_method = f"{conformer_generation_method} + uff_min_energy_fallback"
                 for cid in conf_ids:
                     ff = AllChem.UFFGetMoleculeForceField(mol_work, confId=int(cid))
                     if ff is None:
@@ -1943,30 +1982,75 @@ class FeatureExtractor:
                     random_seed=random_seed,
                     source="rdkit_forcefield_ranking",
                     proxy_note="Conformers were generated but force-field optimization/ranking failed.",
+                    n_conformers_requested=n_requested,
                     n_conformers_generated=n_generated,
                     n_conformers_optimized=0,
+                    n_conformers_ranked=0,
+                    conformer_generation_method=conformer_generation_method,
                     selection_method=selection_method,
+                    forcefield_used=forcefield_used,
                     ranking_energy_type=ranking_energy_type,
+                    duplicate_filter_applied=True,
+                    energy_dedup_threshold=energy_dedup_threshold,
                 )
 
-            best_cid, best_energy = min(energies.items(), key=lambda kv: kv[1])
+            ranked_items = sorted(energies.items(), key=lambda kv: kv[1])
+            deduped_ranked: List[Tuple[int, float]] = []
+            for cid, e in ranked_items:
+                if not deduped_ranked:
+                    deduped_ranked.append((cid, e))
+                    continue
+                if abs(e - deduped_ranked[-1][1]) >= energy_dedup_threshold:
+                    deduped_ranked.append((cid, e))
+
+            n_ranked = len(deduped_ranked)
+            if n_ranked == 0:
+                return self._default_most_stable_conformation_proxy(
+                    random_seed=random_seed,
+                    source="rdkit_forcefield_ranking",
+                    proxy_note="Conformers were optimized but filtered out during energy deduplication.",
+                    n_conformers_requested=n_requested,
+                    n_conformers_generated=n_generated,
+                    n_conformers_optimized=n_optimized,
+                    n_conformers_ranked=0,
+                    conformer_generation_method=conformer_generation_method,
+                    selection_method=selection_method,
+                    forcefield_used=forcefield_used,
+                    ranking_energy_type=ranking_energy_type,
+                    duplicate_filter_applied=True,
+                    energy_dedup_threshold=energy_dedup_threshold,
+                )
+
+            best_cid, best_energy = deduped_ranked[0]
+            limitations = [
+                "candidate-set minimum only, not an exhaustive conformer search",
+                "force-field ranking only (MMFF94/UFF), not quantum free-energy ranking",
+                "energy dedup uses forcefield native energy units",
+            ]
+            if n_generated <= 1:
+                limitations.append("candidate set may be very small (<=1 generated conformer)")
             return {
                 "available": True,
                 "is_proxy": True,
                 "conformer_id": int(best_cid),
+                "conformer_generation_method": conformer_generation_method,
                 "selection_method": selection_method,
                 "selection_scope": "lowest-energy conformer within generated+optimized candidate set of current run",
+                "n_conformers_requested": int(n_requested),
                 "n_conformers_generated": int(n_generated),
                 "n_conformers_optimized": int(n_optimized),
+                "n_conformers_ranked": int(n_ranked),
+                "forcefield_used": forcefield_used,
                 "ranking_energy_type": ranking_energy_type,
                 "ranking_energy_value": float(best_energy),
+                "ranking_energy_unit": "forcefield_native_energy_units",
+                "duplicate_filter_applied": True,
+                "energy_dedup_threshold": energy_dedup_threshold,
+                "energy_dedup_threshold_unit": "forcefield_native_energy_units",
                 "random_seed": int(random_seed),
                 "source": "rdkit_etkdg_forcefield_ranking",
                 "proxy_note": "Selected within current candidate set; not guaranteed global most stable conformation.",
-                "limitations": [
-                    "candidate-set minimum only, not an exhaustive conformer search",
-                    "force-field ranking only (MMFF94/UFF), not quantum free-energy ranking",
-                ],
+                "limitations": limitations,
             }
         except Exception as e:
             logger.warning(f"[{molecule_id}] most_stable_conformation workflow failed: {e}")
@@ -1975,6 +2059,9 @@ class FeatureExtractor:
                 source="rdkit_conformer_workflow_exception",
                 proxy_note=f"Conformer workflow exception: {e}",
                 selection_method="rdkit_etkdg_v3 + forcefield_min_energy",
+                conformer_generation_method="rdkit_etkdg_v3",
+                duplicate_filter_applied=True,
+                energy_dedup_threshold=1e-4,
             )
     
     def _detect_point_group(self, mol) -> Optional[str]:

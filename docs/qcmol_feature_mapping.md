@@ -69,6 +69,8 @@
   - `available=true` only when conformer generation + force-field ranking actually runs
   - `selection_scope` is restricted to candidate conformers generated/optimized in current run
   - `random_seed` is persisted for ETKDG reproducibility
+  - candidate count strategy (B3.1): `n_requested = clamp(4 + 3*rotatable_bonds, 4, 24)`
+  - energy dedup threshold uses forcefield native energy units (`energy_dedup_threshold = 1e-4`)
 
 Frozen formulas/constraints:
 - `bond_delocalization_index_proxy_v1(i,j) = max(0, 0.5 * (max(0, Wiberg_ij) + max(0, Mayer_ij)))`
