@@ -1506,7 +1506,10 @@ class FeatureExtractor:
                 "hirshfeld": hirshfeld,
                 "cm5": cm5,
                 "bader": None,
-            }
+            },
+            atomic_density_partition_volume_proxy={
+                "bader": None,
+            },
         )
         
         # ============ 步骤 9: 提取 Fock 矩阵（可选） ============
@@ -1771,15 +1774,6 @@ class FeatureExtractor:
                         features = critic2_result.features
                         if "qtaim" in features:
                             builder.set_external_features("critic2", features)
-                            bader_charges = features.get("qtaim", {}).get("bader_charges")
-                            current_partition = builder.data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
-                            builder.set_atom_features(
-                                atomic_density_partition_charge_proxy={
-                                    "hirshfeld": current_partition.get("hirshfeld"),
-                                    "cm5": current_partition.get("cm5"),
-                                    "bader": bader_charges,
-                                }
-                            )
                             logger.success(f"[{molecule_id}] Critic2 analysis completed: {features['qtaim'].get('n_bader_volumes', 0)} Bader volumes")
                     else:
                         logger.warning(f"[{molecule_id}] Critic2 soft-fail: {critic2_result.failure_reason}")
@@ -1815,6 +1809,10 @@ class FeatureExtractor:
                 execution_status="disabled",
                 failure_reason="disabled_by_plan",
             )
+
+        # 同步 Bader 写回到 atom-level proxy，并明确区分
+        # success / unavailable / not_attempted 语义
+        self._sync_bader_partition_proxy_from_external(builder, molecule_id)
         
         # 长度校验 (M5: 记录 reason codes)
         valid, mismatch_reasons = self._validate_feature_lengths(builder, molecule_id)
@@ -1846,6 +1844,92 @@ class FeatureExtractor:
         )
         
         return result
+
+    def _assess_external_array_availability(
+        self,
+        execution_status: str,
+        values: Any,
+        natm: Optional[int],
+        field_name: str,
+    ) -> Tuple[str, str, Optional[List[float]]]:
+        """
+        将 external bridge 执行状态 + 解析数组 转换为字段可用性语义:
+        - success
+        - unavailable
+        - not_attempted
+        """
+        status = execution_status or "not_attempted"
+        if status in ("not_attempted", "disabled", "skipped"):
+            return "not_attempted", f"external_bridge_{status}", None
+
+        if status in ("failed", "timeout"):
+            return "unavailable", f"external_bridge_{status}", None
+
+        if status != "success":
+            return "unavailable", f"external_bridge_unknown_status:{status}", None
+
+        if values is None:
+            return "unavailable", f"{field_name}_missing_after_success", None
+        if not isinstance(values, list):
+            return "unavailable", f"{field_name}_invalid_type:{type(values).__name__}", None
+
+        if isinstance(natm, int) and natm >= 0 and len(values) != natm:
+            return "unavailable", f"{field_name}_length_mismatch:{len(values)}!=natm:{natm}", None
+
+        return "success", "ok", values
+
+    def _sync_bader_partition_proxy_from_external(self, builder: UnifiedOutputBuilder, molecule_id: str) -> None:
+        """
+        将 critic2 解析结果统一写回 atom-level proxy，并显式区分:
+        success / unavailable / not_attempted
+        """
+        data = builder.data
+        natm = data.get("molecule_info", {}).get("natm")
+        critic2_bridge = (data.get("external_bridge", {}) or {}).get("critic2", {}) or {}
+        execution_status = critic2_bridge.get("execution_status") or "not_attempted"
+
+        qtaim = (
+            (data.get("external_features", {}) or {})
+            .get("critic2", {})
+            .get("qtaim", {})
+        ) or {}
+
+        bader_charge_status, bader_charge_reason, bader_charges = self._assess_external_array_availability(
+            execution_status=execution_status,
+            values=qtaim.get("bader_charges"),
+            natm=natm,
+            field_name="bader_charges",
+        )
+        bader_volume_status, bader_volume_reason, bader_volumes = self._assess_external_array_availability(
+            execution_status=execution_status,
+            values=qtaim.get("bader_volumes"),
+            natm=natm,
+            field_name="bader_volumes",
+        )
+
+        current_partition = data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
+        builder.set_atom_features(
+            atomic_density_partition_charge_proxy={
+                "hirshfeld": current_partition.get("hirshfeld"),
+                "cm5": current_partition.get("cm5"),
+                "bader": bader_charges,
+            },
+            atomic_density_partition_volume_proxy={
+                "bader": bader_volumes,
+            },
+        )
+        builder.set_atom_metadata(
+            "atomic_density_partition_charge_proxy",
+            bader_status=bader_charge_status,
+            bader_status_reason=bader_charge_reason,
+            bader_volume_status=bader_volume_status,
+            bader_volume_status_reason=bader_volume_reason,
+        )
+
+        logger.debug(
+            f"[{molecule_id}] Bader proxy sync: execution_status={execution_status}, "
+            f"charge_status={bader_charge_status}, volume_status={bader_volume_status}"
+        )
 
     def _default_most_stable_conformation_proxy(
         self,
@@ -2508,6 +2592,17 @@ class FeatureExtractor:
                         f"has {len(arr)} elements, expected {natm} (natm)"
                     )
                     reason_codes.append(f"atom_feature_length_mismatch_atomic_density_partition_charge_proxy_{sub}")
+
+        # 1.1.1 检查 atomic_density_partition_volume_proxy 子字段长度
+        volume_partition = atom_feat.get("atomic_density_partition_volume_proxy")
+        if isinstance(volume_partition, dict):
+            arr = volume_partition.get("bader")
+            if isinstance(arr, list) and len(arr) != natm:
+                logger.warning(
+                    f"[{molecule_id}] Length mismatch: atomic_density_partition_volume_proxy.bader "
+                    f"has {len(arr)} elements, expected {natm} (natm)"
+                )
+                reason_codes.append("atom_feature_length_mismatch_atomic_density_partition_volume_proxy_bader")
 
         # 1.2 检查 atomic_orbital_descriptor_proxy_v1 固定 shape
         descriptor = atom_feat.get("atomic_orbital_descriptor_proxy_v1")

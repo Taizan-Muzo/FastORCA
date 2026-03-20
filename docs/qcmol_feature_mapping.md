@@ -46,6 +46,7 @@
 
 - `atom_features.atomic_charge_iao_proxy`
 - `atom_features.atomic_density_partition_charge_proxy = {hirshfeld, cm5, bader}`
+- `atom_features.atomic_density_partition_volume_proxy = {bader}`
 - `bond_features.bond_delocalization_index_proxy_v1`
 - `bond_features.bond_orbital_localization_proxy`
 - `bond_features.bond_order_weighted_localization_proxy`
@@ -91,6 +92,7 @@
 Objects with frozen metadata contract:
 - `atom_features.metadata.atomic_charge_iao_proxy`
 - `atom_features.metadata.atomic_density_partition_charge_proxy`
+- `atom_features.metadata.atomic_density_partition_volume_proxy`
 - `bond_features.metadata.bond_delocalization_index_proxy_v1`
 - `bond_features.metadata.bond_orbital_localization_proxy`
 - `bond_features.metadata.bond_order_weighted_localization_proxy`
@@ -129,6 +131,21 @@ Frozen formulas/constraints:
 - Backward compatibility:
   - `external_bridge.<tool>.input_file/output_file/execution_time_seconds/critic2_version` are **deprecated**.
   - New code should read/write `metadata` and `artifact_refs` first.
+
+### Bader writeback semantics (v1)
+
+- Atom-level canonical paths:
+  - `atom_features.atomic_density_partition_charge_proxy.bader`
+  - `atom_features.atomic_density_partition_volume_proxy.bader`
+- Availability status is stored in:
+  - `atom_features.metadata.atomic_density_partition_charge_proxy.bader_status`
+  - `atom_features.metadata.atomic_density_partition_charge_proxy.bader_volume_status`
+- Status enum (field availability):
+  - `not_attempted | unavailable | success`
+- Semantics:
+  - `not_attempted`: critic2 was not run (`external_bridge.critic2.execution_status in {not_attempted, disabled, skipped}`)
+  - `unavailable`: critic2 attempted but failed/timeout, or returned missing/invalid-length arrays
+  - `success`: parsed list exists and is aligned to `natm`
 
 ## bond_indices Semantics
 

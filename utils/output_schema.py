@@ -31,6 +31,7 @@ class UnifiedOutputBuilder:
     # Contract constants (do not store as per-placeholder runtime fields)
     ROADMAP_STATUS_ENUM = ("missing", "placeholder", "implemented_proxy", "implemented_exact")
     EXTERNAL_BRIDGE_EXECUTION_STATUS_ENUM = ("not_attempted", "success", "failed", "timeout", "skipped", "disabled")
+    BADER_FIELD_STATUS_ENUM = ("not_attempted", "unavailable", "success")
     
     def __init__(self, molecule_id: str, smiles: str):
         """
@@ -300,6 +301,9 @@ class UnifiedOutputBuilder:
                     "cm5": None,
                     "bader": None,
                 },
+                "atomic_density_partition_volume_proxy": {
+                    "bader": None,
+                },
                 "atomic_lone_pair_heuristic_proxy": None,
                 "atomic_orbital_descriptor_proxy_v1": {
                     "n_dominant_ibo": None,
@@ -330,9 +334,27 @@ class UnifiedOutputBuilder:
                             "cm5": "hirshfeld_plus_cm5_correction",
                             "bader": "external_features.critic2.qtaim.bader_charges"
                         },
+                        "bader_status": "not_attempted",
+                        "bader_status_reason": "not_attempted_by_default",
+                        "bader_volume_status": "not_attempted",
+                        "bader_volume_status_reason": "not_attempted_by_default",
                         "limitations": [
                             "bader field may be null when external bridge is not executed"
                         ]
+                    },
+                    "atomic_density_partition_volume_proxy": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "units": "critic2_native_volume_units",
+                        "field_order": ["bader"],
+                        "sources": {
+                            "bader": "external_features.critic2.qtaim.bader_volumes"
+                        },
+                        "limitations": [
+                            "units follow critic2 parsed output and may depend on cube/input convention",
+                            "bader volume field may be null when external bridge is not executed or parsing fails",
+                        ],
                     },
                     "atomic_lone_pair_heuristic_proxy": {
                         "is_proxy": True,
