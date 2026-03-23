@@ -118,10 +118,10 @@ class Critic2Adapter(ExternalAdapter):
             f"# Load density cube with absolute path",
             f"load {density_cube.absolute()} id rho",
             "",
-            "# QTAIM analysis",
-            "qtaim",
+            "# Keep integrable list focused on population to avoid unstable Laplacian/FFT path",
+            "integrable $rho f name Pop",
             "",
-            "# Output atomic properties",
+            "# Output atomic properties (Bader integration)",
             "bader",
             "",
         ]
