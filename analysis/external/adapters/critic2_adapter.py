@@ -120,6 +120,10 @@ class Critic2Adapter(ExternalAdapter):
             # NUMERICAL derivatives can avoid FFT periodic-cell requirement on non-periodic molecular cubes.
             f"load {density_cube.absolute()} numerical id rho",
             "",
+            "# Keep integrable set minimal to avoid Laplacian FFT path on non-periodic grids",
+            "integrable clear",
+            "integrable $rho f name Pop",
+            "",
             "# Output atomic properties (Bader integration)",
             "bader",
             "",
@@ -321,15 +325,16 @@ class Critic2Adapter(ExternalAdapter):
         
         return features
 
-    def _parse_integrated_atomic_properties(self, content: str) -> tuple[List[float], List[float]]:
+    def _parse_integrated_atomic_properties(self, content: str) -> tuple[List[float], List[Optional[float]]]:
         """
         解析 Integrated atomic properties 表：
         # Id cp ncp Name Z mult Volume Pop Lap ...
         """
         lines = content.split('\n')
         in_table = False
+        header_map: Dict[str, int] = {}
         charges: List[float] = []
-        volumes: List[float] = []
+        volumes: List[Optional[float]] = []
 
         for line in lines:
             if "Integrated atomic properties" in line:
@@ -345,17 +350,31 @@ class Critic2Adapter(ExternalAdapter):
                 continue
             if s.startswith("* Integrated molecular properties") or s.startswith("critic2:"):
                 break
-            if s.startswith("#") or set(s) == {"-"}:
+            if s.startswith("#"):
+                cols = s.lstrip("#").split()
+                header_map = {name: idx for idx, name in enumerate(cols)}
+                continue
+            if set(s) == {"-"}:
                 continue
 
             parts = s.split()
-            # Expected minimum: Id cp ncp Name Z mult Volume Pop Lap
-            if len(parts) < 9 or not parts[0].isdigit():
+            if not parts or not parts[0].isdigit():
                 continue
             try:
-                z = int(parts[4])
-                volume = float(parts[6])
-                pop = float(parts[7])
+                z_idx = header_map.get("Z", 4)
+                pop_idx = header_map.get("Pop")
+                vol_idx = header_map.get("Volume")
+                if pop_idx is None:
+                    # fallback for unexpected headers: legacy assumption
+                    pop_idx = 7 if len(parts) > 7 else None
+                if pop_idx is None or z_idx >= len(parts) or pop_idx >= len(parts):
+                    continue
+
+                z = int(parts[z_idx])
+                pop = float(parts[pop_idx])
+                volume = None
+                if vol_idx is not None and vol_idx < len(parts):
+                    volume = float(parts[vol_idx])
             except (ValueError, IndexError):
                 continue
 
