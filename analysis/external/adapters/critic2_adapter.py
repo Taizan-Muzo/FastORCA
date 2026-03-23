@@ -160,11 +160,32 @@ class Critic2Adapter(ExternalAdapter):
             with open(yt_input_file, "w") as f:
                 f.write(yt_script_text)
             yt_result = self.executor.execute(args=[], input_text=yt_script_text)
+            yt_output_file = input_bundle.working_directory / "critic2_yt_fallback.out"
+            with open(yt_output_file, "w") as f:
+                f.write(yt_result.stdout or "")
+                if yt_result.stderr:
+                    f.write("\n# STDERR\n")
+                    f.write(yt_result.stderr)
             if yt_result.returncode == 0:
                 logger.info("Critic2 YT fallback succeeded")
                 exec_result = yt_result
             else:
                 logger.warning("Critic2 YT fallback still failed; keeping original BADER failure result")
+                # Keep both outputs for diagnosis in main output artifact
+                combined_stdout = (exec_result.stdout or "")
+                combined_stdout += "\n\n# ===== YT FALLBACK OUTPUT =====\n"
+                combined_stdout += (yt_result.stdout or "")
+                combined_stderr = (exec_result.stderr or "")
+                if yt_result.stderr:
+                    combined_stderr += ("\n" if combined_stderr else "") + yt_result.stderr
+                exec_result = ExecutionResult(
+                    returncode=exec_result.returncode,
+                    stdout=combined_stdout,
+                    stderr=combined_stderr,
+                    execution_time_seconds=exec_result.execution_time_seconds + yt_result.execution_time_seconds,
+                    command=exec_result.command + " | yt_fallback",
+                    timed_out=exec_result.timed_out or yt_result.timed_out,
+                )
         
         # 保存输出到文件
         with open(input_bundle.output_file, 'w') as f:
