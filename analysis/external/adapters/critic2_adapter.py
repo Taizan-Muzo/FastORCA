@@ -116,10 +116,8 @@ class Critic2Adapter(ExternalAdapter):
             f"molecule xyz {xyz_file.absolute()}",
             "",
             f"# Load density cube with absolute path",
-            f"load {density_cube.absolute()} id rho",
-            "",
-            "# Avoid Laplacian integration on non-periodic grid (can trigger FFT periodic-cell error)",
-            "prop_mode 1",
+            # NUMERICAL derivatives can avoid FFT periodic-cell requirement on non-periodic molecular cubes.
+            f"load {density_cube.absolute()} numerical id rho",
             "",
             "# Output atomic properties (Bader integration)",
             "bader",
