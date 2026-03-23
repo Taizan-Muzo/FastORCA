@@ -140,9 +140,12 @@ class Critic2Adapter(ExternalAdapter):
         if not self.executor.check_executable():
             raise FileNotFoundError(f"critic2 executable not found: {self.config['executable']}")
         
-        # 执行
-        # cwd 已设置为 working_directory，传 basename 避免重复相对路径导致 fopen_read 失败
-        exec_result = self.executor.execute_script(Path(input_bundle.input_file.name))
+        # 执行（兼容性模式）
+        # 对部分 critic2 构建，`critic2 input.in` 会直接 STOP 1，
+        # 但 `critic2 < input.in` 可稳定运行，因此改为 stdin 喂入脚本。
+        with open(input_bundle.input_file, "r") as f:
+            script_text = f.read()
+        exec_result = self.executor.execute(args=[], input_text=script_text)
         
         # 保存输出到文件
         with open(input_bundle.output_file, 'w') as f:
