@@ -152,10 +152,10 @@ class Critic2Adapter(ExternalAdapter):
         if (
             exec_result.returncode != 0
             and "ERROR (fft): for FFT operations, the input grid must span the periodic cell" in stdout_text
-            and re.search(r"(?im)^\\s*bader\\s*$", script_text) is not None
+            and re.search(r"(?im)^\s*bader\s*$", script_text) is not None
         ):
             logger.warning("Critic2 BADER failed due FFT periodic-grid constraint; retrying with YT fallback")
-            yt_script_text = re.sub(r"(?im)^\\s*bader\\s*$", "yt", script_text)
+            yt_script_text = re.sub(r"(?im)^\s*bader\s*$", "yt", script_text)
             yt_input_file = input_bundle.working_directory / "critic2_yt_fallback.in"
             with open(yt_input_file, "w") as f:
                 f.write(yt_script_text)
