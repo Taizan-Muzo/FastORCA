@@ -112,9 +112,9 @@ class Critic2Adapter(ExternalAdapter):
     def _generate_qtaim_script(self, density_cube: Path, xyz_file: Path) -> List[str]:
         """生成 QTAIM 分析脚本"""
         lines = [
-            f"# Load molecular geometry first (required by critic2 before load/qtaim)",
-            # Use explicit format keyword for compatibility with older/dev critic2 parsers.
-            f"molecule xyz {xyz_file.absolute()}",
+            f"# Load molecular geometry from cube so molecular cell aligns with grid domain",
+            # This avoids non-periodic grid vs molecular-cell mismatch in some critic2 builds.
+            f"molecule {density_cube.absolute()}",
             "",
             f"# Load density cube with absolute path",
             # NUMERICAL derivatives can avoid FFT periodic-cell requirement on non-periodic molecular cubes.
