@@ -5,6 +5,7 @@ critic2 量子化学分析工具适配器
 
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+import re
 import shutil
 from loguru import logger
 
@@ -144,6 +145,26 @@ class Critic2Adapter(ExternalAdapter):
         with open(input_bundle.input_file, "r") as f:
             script_text = f.read()
         exec_result = self.executor.execute(args=[], input_text=script_text)
+
+        # Fallback: BADER + non-periodic grid 可能触发 FFT periodic-cell 报错。
+        # 该场景下自动退化为 YT 算法重试（官方对 grid 场景也推荐 YT）。
+        stdout_text = exec_result.stdout or ""
+        if (
+            exec_result.returncode != 0
+            and "ERROR (fft): for FFT operations, the input grid must span the periodic cell" in stdout_text
+            and re.search(r"(?im)^\\s*bader\\s*$", script_text) is not None
+        ):
+            logger.warning("Critic2 BADER failed due FFT periodic-grid constraint; retrying with YT fallback")
+            yt_script_text = re.sub(r"(?im)^\\s*bader\\s*$", "yt", script_text)
+            yt_input_file = input_bundle.working_directory / "critic2_yt_fallback.in"
+            with open(yt_input_file, "w") as f:
+                f.write(yt_script_text)
+            yt_result = self.executor.execute(args=[], input_text=yt_script_text)
+            if yt_result.returncode == 0:
+                logger.info("Critic2 YT fallback succeeded")
+                exec_result = yt_result
+            else:
+                logger.warning("Critic2 YT fallback still failed; keeping original BADER failure result")
         
         # 保存输出到文件
         with open(input_bundle.output_file, 'w') as f:
@@ -267,9 +288,60 @@ class Critic2Adapter(ExternalAdapter):
             features["qtaim"]["n_bader_volumes"] = len(bader_volumes)
             logger.info(f"Parsed {len(bader_charges)} Bader volumes")
         else:
-            logger.warning("No Bader data found in output")
+            # Fallback parser for "Integrated atomic properties" table (YT/BADER outputs)
+            charges2, volumes2 = self._parse_integrated_atomic_properties(content)
+            if charges2:
+                features["qtaim"]["bader_charges"] = charges2
+                features["qtaim"]["bader_volumes"] = volumes2
+                features["qtaim"]["n_bader_volumes"] = len(volumes2)
+                logger.info(f"Parsed {len(charges2)} atomic properties from integrated table")
+            else:
+                logger.warning("No Bader data found in output")
         
         return features
+
+    def _parse_integrated_atomic_properties(self, content: str) -> tuple[List[float], List[float]]:
+        """
+        解析 Integrated atomic properties 表：
+        # Id cp ncp Name Z mult Volume Pop Lap ...
+        """
+        lines = content.split('\n')
+        in_table = False
+        charges: List[float] = []
+        volumes: List[float] = []
+
+        for line in lines:
+            if "Integrated atomic properties" in line:
+                in_table = True
+                continue
+            if not in_table:
+                continue
+
+            s = line.strip()
+            if not s:
+                if charges:
+                    break
+                continue
+            if s.startswith("* Integrated molecular properties") or s.startswith("critic2:"):
+                break
+            if s.startswith("#") or set(s) == {"-"}:
+                continue
+
+            parts = s.split()
+            # Expected minimum: Id cp ncp Name Z mult Volume Pop Lap
+            if len(parts) < 9 or not parts[0].isdigit():
+                continue
+            try:
+                z = int(parts[4])
+                volume = float(parts[6])
+                pop = float(parts[7])
+            except (ValueError, IndexError):
+                continue
+
+            charges.append(float(z - pop))
+            volumes.append(volume)
+
+        return charges, volumes
     
     def _parse_version(self, content: str) -> Optional[str]:
         """解析 critic2 版本"""
