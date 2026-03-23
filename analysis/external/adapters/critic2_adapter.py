@@ -112,10 +112,11 @@ class Critic2Adapter(ExternalAdapter):
         """生成 QTAIM 分析脚本"""
         lines = [
             f"# Load molecular geometry first (required by critic2 before load/qtaim)",
-            f'molecule "{xyz_file.absolute()}"',
+            # Use explicit format keyword for compatibility with older/dev critic2 parsers.
+            f"molecule xyz {xyz_file.absolute()}",
             "",
             f"# Load density cube with absolute path",
-            f'load "{density_cube.absolute()}" id rho',
+            f"load {density_cube.absolute()} id rho",
             "",
             "# QTAIM analysis",
             "qtaim",
