@@ -248,6 +248,7 @@ class Critic2Adapter(ExternalAdapter):
         features = {
             "qtaim": {
                 "bader_charges": None,
+                "bader_populations": None,
                 "bader_volumes": None,
                 "n_bader_volumes": 0,
             }
@@ -266,11 +267,14 @@ class Critic2Adapter(ExternalAdapter):
         #    2   1   H      0.3827       12.123
         
         in_bader_table = False
+        saw_population_header = False
+        bader_populations = []
         
         for i, line in enumerate(lines):
-            # 检测 Bader 表格开始
-            if "Atomic properties" in line or "Bader" in line:
+            # 仅在明确 "Atomic properties" 段落中启用该解析器，避免误匹配其它 BADER 文本段。
+            if "Atomic properties" in line:
                 in_bader_table = True
+                saw_population_header = False
                 continue
             
             if not in_bader_table:
@@ -278,6 +282,9 @@ class Critic2Adapter(ExternalAdapter):
             
             # 跳过表头行
             if "Id" in line and "Population" in line:
+                saw_population_header = True
+                continue
+            if not saw_population_header:
                 continue
             
             # 尝试解析数据行
@@ -295,6 +302,7 @@ class Critic2Adapter(ExternalAdapter):
                     charge = z - population
                     
                     bader_charges.append(charge)
+                    bader_populations.append(population)
                     bader_volumes.append(volume)
                     
                 except (ValueError, IndexError):
@@ -309,14 +317,16 @@ class Critic2Adapter(ExternalAdapter):
         
         if bader_charges:
             features["qtaim"]["bader_charges"] = bader_charges
+            features["qtaim"]["bader_populations"] = bader_populations
             features["qtaim"]["bader_volumes"] = bader_volumes
             features["qtaim"]["n_bader_volumes"] = len(bader_volumes)
             logger.info(f"Parsed {len(bader_charges)} Bader volumes")
         else:
             # Fallback parser for "Integrated atomic properties" table (YT/BADER outputs)
-            charges2, volumes2 = self._parse_integrated_atomic_properties(content)
+            charges2, populations2, volumes2 = self._parse_integrated_atomic_properties(content)
             if charges2:
                 features["qtaim"]["bader_charges"] = charges2
+                features["qtaim"]["bader_populations"] = populations2
                 features["qtaim"]["bader_volumes"] = volumes2
                 features["qtaim"]["n_bader_volumes"] = len(volumes2)
                 logger.info(f"Parsed {len(charges2)} atomic properties from integrated table")
@@ -325,7 +335,7 @@ class Critic2Adapter(ExternalAdapter):
         
         return features
 
-    def _parse_integrated_atomic_properties(self, content: str) -> tuple[List[float], List[Optional[float]]]:
+    def _parse_integrated_atomic_properties(self, content: str) -> tuple[List[float], List[float], List[Optional[float]]]:
         """
         解析 Integrated atomic properties 表：
         # Id cp ncp Name Z mult Volume Pop Lap ...
@@ -334,6 +344,7 @@ class Critic2Adapter(ExternalAdapter):
         in_table = False
         header_map: Dict[str, int] = {}
         charges: List[float] = []
+        populations: List[float] = []
         volumes: List[Optional[float]] = []
 
         for line in lines:
@@ -379,9 +390,10 @@ class Critic2Adapter(ExternalAdapter):
                 continue
 
             charges.append(float(z - pop))
+            populations.append(float(pop))
             volumes.append(volume)
 
-        return charges, volumes
+        return charges, populations, volumes
     
     def _parse_version(self, content: str) -> Optional[str]:
         """解析 critic2 版本"""

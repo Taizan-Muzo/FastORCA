@@ -332,8 +332,9 @@ class UnifiedOutputBuilder:
                         "sources": {
                             "hirshfeld": "pyscf_hirshfeld",
                             "cm5": "hirshfeld_plus_cm5_correction",
-                            "bader": "external_features.critic2.qtaim.bader_charges"
+                            "bader": "derived_from_external_features.critic2.qtaim.bader_populations"
                         },
+                        "bader_charge_formula": "q_i = Z_i - N_i(Bader)",
                         "bader_status": "not_attempted",
                         "bader_status_reason": "not_attempted_by_default",
                         "bader_volume_status": "not_attempted",
@@ -653,6 +654,7 @@ class UnifiedOutputBuilder:
                 "critic2": {
                     "qtaim": {
                         "bader_charges": None,
+                        "bader_populations": None,
                         "bader_volumes": None,
                         "n_bader_volumes": None,
                         "metadata": {

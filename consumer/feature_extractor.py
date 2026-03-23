@@ -1894,18 +1894,72 @@ class FeatureExtractor:
             .get("qtaim", {})
         ) or {}
 
-        bader_charge_status, bader_charge_reason, bader_charges = self._assess_external_array_availability(
+        bader_population_status, bader_population_reason, bader_populations = self._assess_external_array_availability(
             execution_status=execution_status,
-            values=qtaim.get("bader_charges"),
+            values=qtaim.get("bader_populations"),
             natm=natm,
-            field_name="bader_charges",
+            field_name="bader_populations",
         )
+        bader_charge_status = "unavailable"
+        bader_charge_reason = "bader_charge_not_computed"
+        bader_charges: Optional[List[float]] = None
+
+        atomic_numbers = data.get("atom_features", {}).get("atomic_number")
+        total_charge = data.get("molecule_info", {}).get("charge")
+        atomic_number_valid = isinstance(atomic_numbers, list) and isinstance(natm, int) and len(atomic_numbers) == natm
+
+        if bader_population_status == "success" and bader_populations is not None and atomic_number_valid:
+            # Canonical writeback definition: q_i = Z_i - N_i(Bader)
+            bader_charges = [float(z) - float(pop) for z, pop in zip(atomic_numbers, bader_populations)]
+
+            # Sanity-check: sum(N_i) should approximately equal total electrons.
+            if isinstance(total_charge, (int, float)):
+                expected_electrons = float(sum(float(z) for z in atomic_numbers) - float(total_charge))
+                parsed_electrons = float(sum(float(pop) for pop in bader_populations))
+                electron_tol = max(0.5, 0.02 * expected_electrons)
+                if abs(parsed_electrons - expected_electrons) > electron_tol:
+                    bader_charges = None
+                    bader_charge_status = "unavailable"
+                    bader_charge_reason = (
+                        f"bader_population_sum_mismatch:{parsed_electrons:.6f}!=expected:{expected_electrons:.6f}"
+                    )
+                else:
+                    bader_charge_status = "success"
+                    bader_charge_reason = "ok"
+            else:
+                bader_charge_status = "success"
+                bader_charge_reason = "ok"
+        else:
+            # Backward-compatibility fallback: already-parsed charges from adapter.
+            bader_charge_status, bader_charge_reason, bader_charges = self._assess_external_array_availability(
+                execution_status=execution_status,
+                values=qtaim.get("bader_charges"),
+                natm=natm,
+                field_name="bader_charges",
+            )
+
+            if bader_charge_status == "success" and bader_charges is not None and isinstance(total_charge, (int, float)):
+                charge_sum = float(sum(float(x) for x in bader_charges))
+                charge_tol = max(0.5, 0.05 * max(1.0, abs(float(total_charge))))
+                if abs(charge_sum - float(total_charge)) > charge_tol:
+                    bader_charges = None
+                    bader_charge_status = "unavailable"
+                    bader_charge_reason = (
+                        f"bader_charge_sum_mismatch:{charge_sum:.6f}!=molecule_charge:{float(total_charge):.6f}"
+                    )
+
         bader_volume_status, bader_volume_reason, bader_volumes = self._assess_external_array_availability(
             execution_status=execution_status,
             values=qtaim.get("bader_volumes"),
             natm=natm,
             field_name="bader_volumes",
         )
+        if bader_volume_status == "success" and isinstance(bader_volumes, list):
+            # Success requires at least one real numeric volume; all-null should be unavailable.
+            if not any(v is not None for v in bader_volumes):
+                bader_volume_status = "unavailable"
+                bader_volume_reason = "bader_volumes_all_null_after_success"
+                bader_volumes = None
 
         current_partition = data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
         builder.set_atom_features(
