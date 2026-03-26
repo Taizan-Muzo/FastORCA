@@ -54,6 +54,12 @@ class FeatureExtractor:
     # pass if |sum(N_i) - expected_electrons| <= max(abs_tol, rel_tol * expected_electrons)
     BADER_POPULATION_SUM_ABS_TOL_E = 0.50
     BADER_POPULATION_SUM_REL_TOL = 0.02
+    # Bader coverage uplift: fallback retry with refined density cube on mismatch.
+    BADER_REFINED_RETRY_ENABLED = True
+    BADER_REFINED_GRID_RES_ANGSTROM = 0.16
+    BADER_REFINED_MARGIN_ANGSTROM = 5.5
+    BADER_REFINED_MAX_POINTS_PER_DIM = 180
+    BADER_REFINED_MAX_TOTAL_GRID_POINTS = 3_000_000
     AVAILABILITY_STATUS_ENUM = {"success", "skipped", "unavailable", "not_attempted"}
     
     def __init__(
@@ -1979,7 +1985,7 @@ class FeatureExtractor:
 
         # 同步 Bader 写回到 atom-level proxy，并明确区分
         # success / unavailable / not_attempted 语义
-        self._sync_bader_partition_proxy_from_external(builder, molecule_id)
+        self._sync_bader_partition_proxy_from_external(builder, molecule_id, mol=mol, mf=mf)
         
         # 长度校验 (M5: 记录 reason codes)
         valid, mismatch_reasons = self._validate_feature_lengths(builder, molecule_id)
@@ -2164,21 +2170,37 @@ class FeatureExtractor:
 
         return "success", "ok", values
 
-    def _sync_bader_partition_proxy_from_external(self, builder: UnifiedOutputBuilder, molecule_id: str) -> None:
-        """
-        将 critic2 解析结果统一写回 atom-level proxy，并显式区分:
-        success / unavailable / not_attempted
-        """
-        data = builder.data
-        natm = data.get("molecule_info", {}).get("natm")
-        critic2_bridge = (data.get("external_bridge", {}) or {}).get("critic2", {}) or {}
-        execution_status = critic2_bridge.get("execution_status") or "not_attempted"
+    def _classify_bader_unavailable_reason(self, reason: Optional[str], parser_note: Optional[str] = None) -> Optional[str]:
+        """Classify bader unavailable reasons for coverage histograms."""
+        if not reason:
+            return None
+        r = str(reason).lower()
+        p = str(parser_note).lower() if parser_note else ""
+        if "sum_mismatch" in r:
+            return "bader_population_sum_mismatch"
+        if "volume_column" in r or "bader_volumes" in r or "all_null" in r:
+            return "volume_column_missing_or_all_null"
+        if "pop_column_missing" in r or "column_ambiguity" in r or "header" in r:
+            return "parser_column_ambiguity"
+        if "density_cube" in r or "grid" in r or "fft" in r or "cube" in r:
+            return "cube_grid_related_issues"
+        if "length_mismatch" in r or "natm" in r or "atomic_number" in r or "mapping" in r:
+            return "atom_mapping_or_length_mismatch"
+        if "integrated_header_found_but_pop_column_missing" in p:
+            return "parser_column_ambiguity"
+        if "without_volume_column" in p:
+            return "volume_column_missing_or_all_null"
+        return "other_or_unknown"
 
-        qtaim = (
-            (data.get("external_features", {}) or {})
-            .get("critic2", {})
-            .get("qtaim", {})
-        ) or {}
+    def _evaluate_bader_from_qtaim(
+        self,
+        data: Dict[str, Any],
+        molecule_id: str,
+        execution_status: str,
+        qtaim: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Evaluate qtaim payload and produce validated bader writeback candidates."""
+        natm = data.get("molecule_info", {}).get("natm")
         qtaim_meta = qtaim.get("metadata") if isinstance(qtaim.get("metadata"), dict) else {}
         atomic_integrated_properties = qtaim.get("atomic_integrated_properties")
 
@@ -2211,10 +2233,7 @@ class FeatureExtractor:
         atomic_number_valid = isinstance(atomic_numbers, list) and isinstance(natm, int) and len(atomic_numbers) == natm
 
         if bader_population_status == "success" and bader_populations is not None and atomic_number_valid:
-            # Canonical writeback definition: q_i = Z_i - N_i(Bader)
             bader_charges = [float(z) - float(pop) for z, pop in zip(atomic_numbers, bader_populations)]
-
-            # Sanity-check: sum(N_i) should approximately equal total electrons.
             if isinstance(total_charge, (int, float)):
                 expected_electrons = float(sum(float(z) for z in atomic_numbers) - float(total_charge))
                 parsed_population_sum = float(sum(float(pop) for pop in bader_populations))
@@ -2247,14 +2266,12 @@ class FeatureExtractor:
                 bader_charge_status = "success"
                 bader_charge_reason = "ok"
         else:
-            # Backward-compatibility fallback: already-parsed charges from adapter.
             bader_charge_status, bader_charge_reason, bader_charges = self._assess_external_array_availability(
                 execution_status=execution_status,
                 values=qtaim.get("bader_charges"),
                 natm=natm,
                 field_name="bader_charges",
             )
-
             if bader_charge_status == "success" and bader_charges is not None and isinstance(total_charge, (int, float)):
                 charge_sum = float(sum(float(x) for x in bader_charges))
                 charge_tol = max(0.5, 0.05 * max(1.0, abs(float(total_charge))))
@@ -2293,11 +2310,231 @@ class FeatureExtractor:
             else:
                 bader_volume_reason = "bader_volumes_missing_after_success"
         if bader_volume_status == "success" and isinstance(bader_volumes, list):
-            # Success requires at least one real numeric volume; all-null should be unavailable.
             if not any(v is not None for v in bader_volumes):
                 bader_volume_status = "unavailable"
                 bader_volume_reason = "bader_volume_column_present_but_all_null"
                 bader_volumes = None
+
+        parser_note = qtaim_meta.get("atomic_property_parse_note")
+        return {
+            "bader_charge_status": bader_charge_status,
+            "bader_charge_reason": bader_charge_reason,
+            "bader_charges": bader_charges,
+            "bader_volume_status": bader_volume_status,
+            "bader_volume_reason": bader_volume_reason,
+            "bader_volumes": bader_volumes,
+            "expected_electrons": expected_electrons,
+            "parsed_population_sum": parsed_population_sum,
+            "population_sum_tolerance": population_sum_tolerance,
+            "bader_population_source_key": bader_population_source_key,
+            "bader_volume_source_key": bader_volume_source_key,
+            "bader_population_reason": bader_population_reason,
+            "bader_population_status": bader_population_status,
+            "parser_note": parser_note,
+            "qtaim_meta": qtaim_meta,
+            "bader_charge_reason_category": self._classify_bader_unavailable_reason(
+                bader_charge_reason if bader_charge_status == "unavailable" else None,
+                parser_note=parser_note,
+            ),
+            "bader_volume_reason_category": self._classify_bader_unavailable_reason(
+                bader_volume_reason if bader_volume_status == "unavailable" else None,
+                parser_note=parser_note,
+            ),
+        }
+
+    def _compute_refined_bader_grid(self, mol: gto.Mole) -> Dict[str, Any]:
+        """Compute refined density-grid config for bader retry."""
+        coords = mol.atom_coords(unit="A")
+        box_min = np.min(coords, axis=0)
+        box_max = np.max(coords, axis=0)
+        box_length = box_max - box_min
+        margin = float(self.BADER_REFINED_MARGIN_ANGSTROM)
+        resolution = float(self.BADER_REFINED_GRID_RES_ANGSTROM)
+        max_dim = int(self.BADER_REFINED_MAX_POINTS_PER_DIM)
+        max_total = int(self.BADER_REFINED_MAX_TOTAL_GRID_POINTS)
+
+        n_points = None
+        for _ in range(5):
+            n_points = np.ceil((box_length + 2.0 * margin) / resolution).astype(int) + 1
+            n_points = np.maximum(n_points, 3)
+            total_points = int(np.prod(n_points.astype(np.int64)))
+            dim_ratio = float(max(np.max(n_points / max(1, max_dim)), 1.0))
+            total_ratio = float(max((total_points / max(1.0, float(max_total))) ** (1.0 / 3.0), 1.0))
+            scale = max(dim_ratio, total_ratio)
+            if scale <= 1.0 + 1e-9:
+                break
+            resolution *= scale * 1.03
+
+        assert n_points is not None
+        total_points = int(np.prod(n_points.astype(np.int64)))
+        return {
+            "grid_resolution_angstrom": float(resolution),
+            "margin_angstrom": float(margin),
+            "grid_shape": [int(n_points[0]), int(n_points[1]), int(n_points[2])],
+            "total_grid_points": int(total_points),
+            "max_points_per_dimension": max_dim,
+            "max_total_grid_points": max_total,
+        }
+
+    def _retry_critic2_with_refined_density(
+        self,
+        builder: UnifiedOutputBuilder,
+        molecule_id: str,
+        mol: Optional[gto.Mole],
+        mf: Optional[dft.rks.RKS],
+        trigger_reason: str,
+    ) -> Dict[str, Any]:
+        """Retry critic2 with a refined density cube to improve bader coverage."""
+        response: Dict[str, Any] = {
+            "attempted": False,
+            "success": False,
+            "failure_reason": None,
+            "qtaim": None,
+            "retry_grid": None,
+            "retry_density_cube": None,
+            "execution_time_seconds": None,
+        }
+        if not self.BADER_REFINED_RETRY_ENABLED:
+            response["failure_reason"] = "bader_refined_retry_disabled"
+            return response
+        if mol is None or mf is None:
+            response["failure_reason"] = "bader_refined_retry_missing_mol_or_mf"
+            return response
+
+        response["attempted"] = True
+        try:
+            from pyscf.tools import cubegen
+
+            retry_grid = self._compute_refined_bader_grid(mol)
+            response["retry_grid"] = retry_grid
+            work_dir = Path("bridges") / "critic2" / molecule_id
+            work_dir.mkdir(parents=True, exist_ok=True)
+            density_path = work_dir / "density_refined_bader.cube"
+            dm = mf.make_rdm1()
+            bohr_to_angstrom = 0.529177210903
+            res_bohr = float(retry_grid["grid_resolution_angstrom"]) / bohr_to_angstrom
+            margin_bohr = float(retry_grid["margin_angstrom"]) / bohr_to_angstrom
+            nx, ny, nz = retry_grid["grid_shape"]
+            cubegen.density(
+                mol,
+                str(density_path),
+                dm,
+                nx=int(nx),
+                ny=int(ny),
+                nz=int(nz),
+                resolution=res_bohr,
+                margin=margin_bohr,
+            )
+            response["retry_density_cube"] = str(density_path)
+        except Exception as e:
+            response["failure_reason"] = f"refined_density_cube_generation_failed:{e}"
+            return response
+
+        try:
+            bridge_context = BridgeContext(
+                molecule_id=molecule_id,
+                atom_symbols=builder.data.get("geometry", {}).get("atom_symbols") or [mol.atom_symbol(i) for i in range(mol.natm)],
+                atom_coords_angstrom=mol.atom_coords(unit="A").tolist(),
+                natm=mol.natm,
+                charge=mol.charge,
+                spin=mol.spin,
+                multiplicity=mol.spin + 1,
+                density_cube_path=response["retry_density_cube"],
+                geometry_coordinate_unit="angstrom",
+                cube_native_unit="bohr",
+                cube_output_unit="angstrom",
+            )
+            retry_result = run_critic2_analysis(bridge_context)
+            response["execution_time_seconds"] = retry_result.bridge_execution_time_seconds
+            if retry_result.success and isinstance(retry_result.features, dict):
+                qtaim = retry_result.features.get("qtaim")
+                if isinstance(qtaim, dict):
+                    response["success"] = True
+                    response["qtaim"] = qtaim
+                else:
+                    response["failure_reason"] = "refined_retry_missing_qtaim_payload"
+            else:
+                response["failure_reason"] = retry_result.failure_reason or "refined_retry_external_failed"
+        except Exception as e:
+            response["failure_reason"] = f"refined_retry_execution_failed:{e}"
+
+        warnings = list((((builder.data.get("external_bridge") or {}).get("critic2") or {}).get("warnings")) or [])
+        if "bader_refined_density_retry_applied" not in warnings:
+            warnings.append("bader_refined_density_retry_applied")
+        if response["attempted"] and not response["success"] and "bader_refined_density_retry_failed" not in warnings:
+            warnings.append("bader_refined_density_retry_failed")
+        builder.set_external_bridge(
+            "critic2",
+            warnings=warnings,
+            metadata={
+                "bader_refined_density_retry_attempted": bool(response["attempted"]),
+                "bader_refined_density_retry_trigger_reason": trigger_reason,
+                "bader_refined_density_retry_success": bool(response["success"]),
+                "bader_refined_density_retry_failure_reason": response["failure_reason"],
+                "bader_refined_density_retry_density_cube": response["retry_density_cube"],
+                "bader_refined_density_retry_grid": response["retry_grid"],
+                "bader_refined_density_retry_execution_time_seconds": response["execution_time_seconds"],
+            },
+        )
+        return response
+
+    def _sync_bader_partition_proxy_from_external(
+        self,
+        builder: UnifiedOutputBuilder,
+        molecule_id: str,
+        mol: Optional[gto.Mole] = None,
+        mf: Optional[dft.rks.RKS] = None,
+    ) -> None:
+        """Sync critic2 qtaim payload into canonical bader proxy fields with strict validation."""
+        data = builder.data
+        critic2_bridge = (data.get("external_bridge", {}) or {}).get("critic2", {}) or {}
+        execution_status = critic2_bridge.get("execution_status") or "not_attempted"
+        qtaim = (((data.get("external_features", {}) or {}).get("critic2", {}) or {}).get("qtaim", {}) or {})
+
+        eval_result = self._evaluate_bader_from_qtaim(
+            data=data,
+            molecule_id=molecule_id,
+            execution_status=execution_status,
+            qtaim=qtaim,
+        )
+        retry_result: Optional[Dict[str, Any]] = None
+        validation_stage = "primary"
+
+        # Coverage uplift retry: only for success-run but sum-mismatch type unavailability.
+        if (
+            execution_status == "success"
+            and eval_result["bader_charge_status"] == "unavailable"
+            and str(eval_result["bader_charge_reason"]).startswith("bader_population_sum_mismatch")
+        ):
+            retry_result = self._retry_critic2_with_refined_density(
+                builder=builder,
+                molecule_id=molecule_id,
+                mol=mol,
+                mf=mf,
+                trigger_reason=eval_result["bader_charge_reason"],
+            )
+            if retry_result.get("success") and isinstance(retry_result.get("qtaim"), dict):
+                retry_eval = self._evaluate_bader_from_qtaim(
+                    data=data,
+                    molecule_id=molecule_id,
+                    execution_status="success",
+                    qtaim=retry_result["qtaim"],
+                )
+                # Replace external_features with refined retry payload for consistency with canonical writeback.
+                builder.set_external_features("critic2", {"qtaim": retry_result["qtaim"]})
+                eval_result = retry_eval
+                validation_stage = "refined_density_retry"
+                if eval_result["bader_charge_status"] == "unavailable":
+                    eval_result["bader_charge_reason"] = (
+                        f"{eval_result['bader_charge_reason']}|after_refined_density_retry"
+                    )
+
+        bader_charge_status = eval_result["bader_charge_status"]
+        bader_charge_reason = eval_result["bader_charge_reason"]
+        bader_charges = eval_result["bader_charges"]
+        bader_volume_status = eval_result["bader_volume_status"]
+        bader_volume_reason = eval_result["bader_volume_reason"]
+        bader_volumes = eval_result["bader_volumes"]
 
         current_partition = data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
         builder.set_atom_features(
@@ -2306,9 +2543,7 @@ class FeatureExtractor:
                 "cm5": current_partition.get("cm5"),
                 "bader": bader_charges,
             },
-            atomic_density_partition_volume_proxy={
-                "bader": bader_volumes,
-            },
+            atomic_density_partition_volume_proxy={"bader": bader_volumes},
         )
         builder.set_atom_metadata(
             "atomic_density_partition_charge_proxy",
@@ -2317,21 +2552,32 @@ class FeatureExtractor:
             bader_volume_status=bader_volume_status,
             bader_volume_status_reason=bader_volume_reason,
         )
-        # Extended diagnostics for downstream triage (stored in existing metadata container).
+
         charge_meta = data.get("atom_features", {}).get("metadata", {}).get("atomic_density_partition_charge_proxy")
         if isinstance(charge_meta, dict):
-            charge_meta["bader_population_expected_electrons"] = expected_electrons
-            charge_meta["bader_population_sum"] = parsed_population_sum
-            charge_meta["bader_population_sum_tolerance"] = population_sum_tolerance
+            charge_meta["bader_population_expected_electrons"] = eval_result["expected_electrons"]
+            charge_meta["bader_population_sum"] = eval_result["parsed_population_sum"]
+            charge_meta["bader_population_sum_tolerance"] = eval_result["population_sum_tolerance"]
             charge_meta["bader_population_sum_tol_abs"] = self.BADER_POPULATION_SUM_ABS_TOL_E
             charge_meta["bader_population_sum_tol_rel"] = self.BADER_POPULATION_SUM_REL_TOL
-            charge_meta["bader_population_source"] = bader_population_source_key
-            charge_meta["bader_volume_source"] = bader_volume_source_key
-            charge_meta["bader_population_parser_note"] = qtaim_meta.get("atomic_property_parse_note")
+            charge_meta["bader_population_source"] = eval_result["bader_population_source_key"]
+            charge_meta["bader_volume_source"] = eval_result["bader_volume_source_key"]
+            charge_meta["bader_population_parser_note"] = eval_result["parser_note"]
+            charge_meta["bader_population_status"] = eval_result["bader_population_status"]
+            charge_meta["bader_population_status_reason"] = eval_result["bader_population_reason"]
+            charge_meta["bader_status_category"] = eval_result["bader_charge_reason_category"]
+            charge_meta["bader_volume_status_category"] = eval_result["bader_volume_reason_category"]
+            charge_meta["bader_validation_stage"] = validation_stage
+            charge_meta["bader_refined_retry_attempted"] = bool(retry_result and retry_result.get("attempted"))
+            charge_meta["bader_refined_retry_success"] = bool(retry_result and retry_result.get("success"))
+            charge_meta["bader_refined_retry_failure_reason"] = (
+                None if not retry_result else retry_result.get("failure_reason")
+            )
 
         logger.debug(
             f"[{molecule_id}] Bader proxy sync: execution_status={execution_status}, "
-            f"charge_status={bader_charge_status}, volume_status={bader_volume_status}"
+            f"charge_status={bader_charge_status}, volume_status={bader_volume_status}, "
+            f"stage={validation_stage}"
         )
 
     def _default_most_stable_conformation_proxy(

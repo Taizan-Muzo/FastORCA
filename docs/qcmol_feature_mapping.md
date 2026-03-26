@@ -197,6 +197,21 @@ Frozen formulas/constraints:
   - raw parsed integrated properties can be preserved in `external_features`.
   - canonical main fields (`atom_features.atomic_density_partition_*_proxy.bader`) still require dedicated validation gates.
 
+### Bader coverage uplift notes (v1)
+
+- Canonical Bader writeback remains validation-gated:
+  - `atom_features.atomic_density_partition_charge_proxy.bader` is written only when population/length checks pass.
+  - `atom_features.atomic_density_partition_volume_proxy.bader` may stay unavailable even when charge succeeds.
+- Coverage uplift mechanism:
+  - If critic2 succeeds but charge fails due population-sum mismatch, the pipeline can run one refined-density retry for critic2.
+  - Refined retry metadata is recorded under `external_bridge.critic2.metadata.bader_refined_density_retry_*`.
+- Unavailable reason categorization is exposed in atom metadata:
+  - `bader_status_category`
+  - `bader_volume_status_category`
+- Batch-level Bader coverage report script:
+  - `scripts/bader_coverage_uplift_report.py`
+  - Supports baseline comparison via `--baseline-report <validation_round_report.json>`.
+
 ## bond_indices Semantics
 
 - `bond_indices` is a bond list aligned to all bond-level arrays in the same order.
