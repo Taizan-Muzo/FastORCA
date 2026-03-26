@@ -60,6 +60,12 @@ class FeatureExtractor:
     BADER_REFINED_MARGIN_ANGSTROM = 5.5
     BADER_REFINED_MAX_POINTS_PER_DIM = 180
     BADER_REFINED_MAX_TOTAL_GRID_POINTS = 3_000_000
+    # Final-mile rescue retry for stubborn mismatch cases.
+    BADER_RESCUE_RETRY_ENABLED = True
+    BADER_RESCUE_GRID_RES_ANGSTROM = 0.14
+    BADER_RESCUE_MARGIN_ANGSTROM = 6.0
+    BADER_RESCUE_MAX_POINTS_PER_DIM = 220
+    BADER_RESCUE_MAX_TOTAL_GRID_POINTS = 5_000_000
     AVAILABILITY_STATUS_ENUM = {"success", "skipped", "unavailable", "not_attempted"}
     
     def __init__(
@@ -2342,16 +2348,23 @@ class FeatureExtractor:
             ),
         }
 
-    def _compute_refined_bader_grid(self, mol: gto.Mole) -> Dict[str, Any]:
-        """Compute refined density-grid config for bader retry."""
+    def _compute_refined_bader_grid(
+        self,
+        mol: gto.Mole,
+        grid_resolution_angstrom: float,
+        margin_angstrom: float,
+        max_points_per_dim: int,
+        max_total_grid_points: int,
+    ) -> Dict[str, Any]:
+        """Compute density-grid config for bader retry."""
         coords = mol.atom_coords(unit="A")
         box_min = np.min(coords, axis=0)
         box_max = np.max(coords, axis=0)
         box_length = box_max - box_min
-        margin = float(self.BADER_REFINED_MARGIN_ANGSTROM)
-        resolution = float(self.BADER_REFINED_GRID_RES_ANGSTROM)
-        max_dim = int(self.BADER_REFINED_MAX_POINTS_PER_DIM)
-        max_total = int(self.BADER_REFINED_MAX_TOTAL_GRID_POINTS)
+        margin = float(margin_angstrom)
+        resolution = float(grid_resolution_angstrom)
+        max_dim = int(max_points_per_dim)
+        max_total = int(max_total_grid_points)
 
         n_points = None
         for _ in range(5):
@@ -2378,13 +2391,13 @@ class FeatureExtractor:
 
     def _retry_critic2_with_refined_density(
         self,
-        builder: UnifiedOutputBuilder,
         molecule_id: str,
         mol: Optional[gto.Mole],
         mf: Optional[dft.rks.RKS],
-        trigger_reason: str,
+        retry_label: str,
+        retry_cfg: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Retry critic2 with a refined density cube to improve bader coverage."""
+        """Retry critic2 with a denser cube to improve bader coverage."""
         response: Dict[str, Any] = {
             "attempted": False,
             "success": False,
@@ -2393,23 +2406,28 @@ class FeatureExtractor:
             "retry_grid": None,
             "retry_density_cube": None,
             "execution_time_seconds": None,
+            "retry_label": retry_label,
+            "retry_cfg": dict(retry_cfg),
         }
-        if not self.BADER_REFINED_RETRY_ENABLED:
-            response["failure_reason"] = "bader_refined_retry_disabled"
-            return response
         if mol is None or mf is None:
-            response["failure_reason"] = "bader_refined_retry_missing_mol_or_mf"
+            response["failure_reason"] = f"{retry_label}_retry_missing_mol_or_mf"
             return response
 
         response["attempted"] = True
         try:
             from pyscf.tools import cubegen
 
-            retry_grid = self._compute_refined_bader_grid(mol)
+            retry_grid = self._compute_refined_bader_grid(
+                mol=mol,
+                grid_resolution_angstrom=float(retry_cfg.get("grid_resolution_angstrom")),
+                margin_angstrom=float(retry_cfg.get("margin_angstrom")),
+                max_points_per_dim=int(retry_cfg.get("max_points_per_dimension")),
+                max_total_grid_points=int(retry_cfg.get("max_total_grid_points")),
+            )
             response["retry_grid"] = retry_grid
             work_dir = Path("bridges") / "critic2" / molecule_id
             work_dir.mkdir(parents=True, exist_ok=True)
-            density_path = work_dir / "density_refined_bader.cube"
+            density_path = work_dir / f"density_{retry_label}_bader.cube"
             dm = mf.make_rdm1()
             bohr_to_angstrom = 0.529177210903
             res_bohr = float(retry_grid["grid_resolution_angstrom"]) / bohr_to_angstrom
@@ -2427,13 +2445,13 @@ class FeatureExtractor:
             )
             response["retry_density_cube"] = str(density_path)
         except Exception as e:
-            response["failure_reason"] = f"refined_density_cube_generation_failed:{e}"
+            response["failure_reason"] = f"{retry_label}_density_cube_generation_failed:{e}"
             return response
 
         try:
             bridge_context = BridgeContext(
                 molecule_id=molecule_id,
-                atom_symbols=builder.data.get("geometry", {}).get("atom_symbols") or [mol.atom_symbol(i) for i in range(mol.natm)],
+                atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
                 atom_coords_angstrom=mol.atom_coords(unit="A").tolist(),
                 natm=mol.natm,
                 charge=mol.charge,
@@ -2452,30 +2470,12 @@ class FeatureExtractor:
                     response["success"] = True
                     response["qtaim"] = qtaim
                 else:
-                    response["failure_reason"] = "refined_retry_missing_qtaim_payload"
+                    response["failure_reason"] = f"{retry_label}_retry_missing_qtaim_payload"
             else:
-                response["failure_reason"] = retry_result.failure_reason or "refined_retry_external_failed"
+                response["failure_reason"] = retry_result.failure_reason or f"{retry_label}_retry_external_failed"
         except Exception as e:
-            response["failure_reason"] = f"refined_retry_execution_failed:{e}"
+            response["failure_reason"] = f"{retry_label}_retry_execution_failed:{e}"
 
-        warnings = list((((builder.data.get("external_bridge") or {}).get("critic2") or {}).get("warnings")) or [])
-        if "bader_refined_density_retry_applied" not in warnings:
-            warnings.append("bader_refined_density_retry_applied")
-        if response["attempted"] and not response["success"] and "bader_refined_density_retry_failed" not in warnings:
-            warnings.append("bader_refined_density_retry_failed")
-        builder.set_external_bridge(
-            "critic2",
-            warnings=warnings,
-            metadata={
-                "bader_refined_density_retry_attempted": bool(response["attempted"]),
-                "bader_refined_density_retry_trigger_reason": trigger_reason,
-                "bader_refined_density_retry_success": bool(response["success"]),
-                "bader_refined_density_retry_failure_reason": response["failure_reason"],
-                "bader_refined_density_retry_density_cube": response["retry_density_cube"],
-                "bader_refined_density_retry_grid": response["retry_grid"],
-                "bader_refined_density_retry_execution_time_seconds": response["execution_time_seconds"],
-            },
-        )
         return response
 
     def _sync_bader_partition_proxy_from_external(
@@ -2498,20 +2498,40 @@ class FeatureExtractor:
             qtaim=qtaim,
         )
         retry_result: Optional[Dict[str, Any]] = None
+        rescue_result: Optional[Dict[str, Any]] = None
+        retry_attempt_records: List[Dict[str, Any]] = []
         validation_stage = "primary"
-
-        # Coverage uplift retry: only for success-run but sum-mismatch type unavailability.
-        if (
+        first_pass_failed = (
             execution_status == "success"
             and eval_result["bader_charge_status"] == "unavailable"
             and str(eval_result["bader_charge_reason"]).startswith("bader_population_sum_mismatch")
-        ):
+        )
+
+        # Coverage uplift retry: only for success-run but sum-mismatch type unavailability.
+        if first_pass_failed and self.BADER_REFINED_RETRY_ENABLED:
+            refined_cfg = {
+                "grid_resolution_angstrom": float(self.BADER_REFINED_GRID_RES_ANGSTROM),
+                "margin_angstrom": float(self.BADER_REFINED_MARGIN_ANGSTROM),
+                "max_points_per_dimension": int(self.BADER_REFINED_MAX_POINTS_PER_DIM),
+                "max_total_grid_points": int(self.BADER_REFINED_MAX_TOTAL_GRID_POINTS),
+            }
             retry_result = self._retry_critic2_with_refined_density(
-                builder=builder,
                 molecule_id=molecule_id,
                 mol=mol,
                 mf=mf,
-                trigger_reason=eval_result["bader_charge_reason"],
+                retry_label="refined",
+                retry_cfg=refined_cfg,
+            )
+            retry_attempt_records.append(
+                {
+                    "label": "refined",
+                    "attempted": bool(retry_result.get("attempted")),
+                    "success": bool(retry_result.get("success")),
+                    "failure_reason": retry_result.get("failure_reason"),
+                    "grid": retry_result.get("retry_grid"),
+                    "density_cube": retry_result.get("retry_density_cube"),
+                    "execution_time_seconds": retry_result.get("execution_time_seconds"),
+                }
             )
             if retry_result.get("success") and isinstance(retry_result.get("qtaim"), dict):
                 retry_eval = self._evaluate_bader_from_qtaim(
@@ -2529,12 +2549,80 @@ class FeatureExtractor:
                         f"{eval_result['bader_charge_reason']}|after_refined_density_retry"
                     )
 
+        # Final-mile rescue retry: still mismatch after refined retry.
+        if (
+            first_pass_failed
+            and self.BADER_RESCUE_RETRY_ENABLED
+            and eval_result["bader_charge_status"] == "unavailable"
+            and str(eval_result["bader_charge_reason"]).startswith("bader_population_sum_mismatch")
+        ):
+            rescue_cfg = {
+                "grid_resolution_angstrom": float(self.BADER_RESCUE_GRID_RES_ANGSTROM),
+                "margin_angstrom": float(self.BADER_RESCUE_MARGIN_ANGSTROM),
+                "max_points_per_dimension": int(self.BADER_RESCUE_MAX_POINTS_PER_DIM),
+                "max_total_grid_points": int(self.BADER_RESCUE_MAX_TOTAL_GRID_POINTS),
+            }
+            rescue_result = self._retry_critic2_with_refined_density(
+                molecule_id=molecule_id,
+                mol=mol,
+                mf=mf,
+                retry_label="rescue",
+                retry_cfg=rescue_cfg,
+            )
+            retry_attempt_records.append(
+                {
+                    "label": "rescue",
+                    "attempted": bool(rescue_result.get("attempted")),
+                    "success": bool(rescue_result.get("success")),
+                    "failure_reason": rescue_result.get("failure_reason"),
+                    "grid": rescue_result.get("retry_grid"),
+                    "density_cube": rescue_result.get("retry_density_cube"),
+                    "execution_time_seconds": rescue_result.get("execution_time_seconds"),
+                }
+            )
+            if rescue_result.get("success") and isinstance(rescue_result.get("qtaim"), dict):
+                rescue_eval = self._evaluate_bader_from_qtaim(
+                    data=data,
+                    molecule_id=molecule_id,
+                    execution_status="success",
+                    qtaim=rescue_result["qtaim"],
+                )
+                builder.set_external_features("critic2", {"qtaim": rescue_result["qtaim"]})
+                eval_result = rescue_eval
+                validation_stage = "rescue_density_retry"
+                if eval_result["bader_charge_status"] == "unavailable":
+                    eval_result["bader_charge_reason"] = (
+                        f"{eval_result['bader_charge_reason']}|after_rescue_density_retry"
+                    )
+
         bader_charge_status = eval_result["bader_charge_status"]
         bader_charge_reason = eval_result["bader_charge_reason"]
         bader_charges = eval_result["bader_charges"]
         bader_volume_status = eval_result["bader_volume_status"]
         bader_volume_reason = eval_result["bader_volume_reason"]
         bader_volumes = eval_result["bader_volumes"]
+
+        if retry_attempt_records:
+            warnings = list((((data.get("external_bridge") or {}).get("critic2") or {}).get("warnings")) or [])
+            if "bader_retry_triggered" not in warnings:
+                warnings.append("bader_retry_triggered")
+            if any(not bool(x.get("success")) for x in retry_attempt_records):
+                if "bader_retry_attempt_failed" not in warnings:
+                    warnings.append("bader_retry_attempt_failed")
+            if any(bool(x.get("success")) for x in retry_attempt_records):
+                if "bader_retry_attempt_succeeded" not in warnings:
+                    warnings.append("bader_retry_attempt_succeeded")
+            builder.set_external_bridge(
+                "critic2",
+                warnings=warnings,
+                metadata={
+                    "bader_retry_first_pass_failed": bool(first_pass_failed),
+                    "bader_retry_triggered": True,
+                    "bader_retry_attempts": retry_attempt_records,
+                    "bader_retry_final_stage": validation_stage,
+                    "bader_retry_final_success": bader_charge_status == "success",
+                },
+            )
 
         current_partition = data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
         builder.set_atom_features(
@@ -2568,10 +2656,19 @@ class FeatureExtractor:
             charge_meta["bader_status_category"] = eval_result["bader_charge_reason_category"]
             charge_meta["bader_volume_status_category"] = eval_result["bader_volume_reason_category"]
             charge_meta["bader_validation_stage"] = validation_stage
+            charge_meta["bader_rescue_first_pass_failed"] = bool(first_pass_failed)
+            charge_meta["bader_rescue_triggered"] = bool(retry_attempt_records)
+            charge_meta["bader_rescue_attempts"] = retry_attempt_records
+            charge_meta["bader_rescue_success"] = any(bool(x.get("success")) for x in retry_attempt_records)
             charge_meta["bader_refined_retry_attempted"] = bool(retry_result and retry_result.get("attempted"))
             charge_meta["bader_refined_retry_success"] = bool(retry_result and retry_result.get("success"))
             charge_meta["bader_refined_retry_failure_reason"] = (
                 None if not retry_result else retry_result.get("failure_reason")
+            )
+            charge_meta["bader_second_retry_attempted"] = bool(rescue_result and rescue_result.get("attempted"))
+            charge_meta["bader_second_retry_success"] = bool(rescue_result and rescue_result.get("success"))
+            charge_meta["bader_second_retry_failure_reason"] = (
+                None if not rescue_result else rescue_result.get("failure_reason")
             )
 
         logger.debug(

@@ -20,6 +20,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+DEFAULT_THRESHOLD_POLICIES = {
+    "current": {"abs_tol_e": 0.50, "rel_tol": 0.02},
+    "candidate_A": {"abs_tol_e": 0.60, "rel_tol": 0.025},
+    "candidate_B": {"abs_tol_e": 0.75, "rel_tol": 0.03},
+}
+
 
 def _get(d: Dict[str, Any], path: str, default: Any = None) -> Any:
     cur: Any = d
@@ -102,6 +108,50 @@ def _spacing_bin(spacing: Optional[float]) -> str:
         return "(0.20,0.25]A"
     return ">0.25A"
 
+def _mismatch_abs_bin(abs_diff: Optional[float]) -> str:
+    if abs_diff is None:
+        return "unknown"
+    if abs_diff <= 0.50:
+        return "<=0.50e"
+    if abs_diff <= 1.00:
+        return "(0.50,1.00]e"
+    if abs_diff <= 2.00:
+        return "(1.00,2.00]e"
+    return ">2.00e"
+
+
+def _mismatch_rel_bin(rel_diff: Optional[float]) -> str:
+    if rel_diff is None:
+        return "unknown"
+    if rel_diff <= 0.02:
+        return "<=2%"
+    if rel_diff <= 0.03:
+        return "(2%,3%]"
+    if rel_diff <= 0.05:
+        return "(3%,5%]"
+    return ">5%"
+
+
+def _bool_key(v: bool) -> str:
+    return "yes" if v else "no"
+
+
+def _is_polar_on_molecule(atom_symbols: Optional[List[str]]) -> bool:
+    syms = atom_symbols or []
+    return any(sym in ("O", "N") for sym in syms)
+
+
+def _natm_bin(natm: Optional[int]) -> str:
+    if not isinstance(natm, int):
+        return "unknown"
+    if natm <= 12:
+        return "<=12"
+    if natm <= 24:
+        return "13-24"
+    if natm <= 36:
+        return "25-36"
+    return ">=37"
+
 
 def build_report(
     unified_dir: Path,
@@ -123,6 +173,25 @@ def build_report(
     strat_size = defaultdict(lambda: {"total": 0, "bader_success": 0, "critic2_success": 0})
     strat_family = defaultdict(lambda: {"total": 0, "bader_success": 0, "critic2_success": 0})
     strat_spacing = defaultdict(lambda: {"total": 0, "bader_success": 0, "critic2_success": 0})
+    mismatch_abs_hist = Counter()
+    mismatch_rel_hist = Counter()
+    mismatch_natm_hist = Counter()
+    mismatch_family_hist = Counter()
+    mismatch_spacing_hist = Counter()
+    mismatch_polar_on_hist = Counter()
+    mismatch_rescue_triggered_hist = Counter()
+    mismatch_validation_stage_hist = Counter()
+    mismatch_current_refined_hist = Counter()
+    mismatch_examples: List[Dict[str, Any]] = []
+    rescue_stats = {
+        "triggered_cases": 0,
+        "recovered_cases": 0,
+        "failed_cases": 0,
+        "attempt_count_histogram": Counter(),
+        "attempt_label_histogram": Counter(),
+        "final_stage_histogram": Counter(),
+    }
+    threshold_scan_candidates: List[Dict[str, Any]] = []
 
     unavailable_examples: List[Dict[str, Any]] = []
 
@@ -151,6 +220,18 @@ def build_report(
 
         bader_non_null = isinstance(bader, list) and (not isinstance(natm, int) or len(bader) == natm)
         bvol_non_null = isinstance(bvol, list) and any(v is not None for v in bvol)
+        expected_e = bmeta.get("bader_population_expected_electrons")
+        parsed_sum = bmeta.get("bader_population_sum")
+        stage = bmeta.get("bader_validation_stage")
+        rescue_triggered = bool(bmeta.get("bader_rescue_triggered"))
+        retry_attempts = bmeta.get("bader_rescue_attempts")
+        is_current_refined = stage in ("refined_density_retry", "rescue_density_retry")
+
+        if isinstance(retry_attempts, list):
+            rescue_stats["attempt_count_histogram"][str(len(retry_attempts))] += 1
+            for a in retry_attempts:
+                if isinstance(a, dict):
+                    rescue_stats["attempt_label_histogram"][str(a.get("label", "unknown"))] += 1
 
         overall_status[st] += 1
         critic2_status[c2] += 1
@@ -172,6 +253,36 @@ def build_report(
                     "validation_stage": bmeta.get("bader_validation_stage"),
                 }
             )
+            if bcat == "bader_population_sum_mismatch":
+                abs_diff: Optional[float] = None
+                rel_diff: Optional[float] = None
+                if isinstance(expected_e, (int, float)) and isinstance(parsed_sum, (int, float)):
+                    abs_diff = abs(float(parsed_sum) - float(expected_e))
+                    rel_diff = abs_diff / max(1.0, abs(float(expected_e)))
+                mismatch_abs_hist[_mismatch_abs_bin(abs_diff)] += 1
+                mismatch_rel_hist[_mismatch_rel_bin(rel_diff)] += 1
+                mismatch_natm_hist[_natm_bin(natm)] += 1
+                mismatch_family_hist[_family_label(smiles, atom_symbols, rotatable_bonds)] += 1
+                mismatch_spacing_hist[_spacing_bin(spacing)] += 1
+                mismatch_polar_on_hist[_bool_key(_is_polar_on_molecule(atom_symbols))] += 1
+                mismatch_rescue_triggered_hist[_bool_key(rescue_triggered)] += 1
+                mismatch_validation_stage_hist[str(stage or "unknown")] += 1
+                mismatch_current_refined_hist[_bool_key(is_current_refined)] += 1
+                mismatch_examples.append(
+                    {
+                        "molecule_id": mid,
+                        "natm": natm,
+                        "smiles": smiles,
+                        "expected_electrons": expected_e,
+                        "parsed_population_sum": parsed_sum,
+                        "abs_diff": abs_diff,
+                        "rel_diff": rel_diff,
+                        "validation_stage": stage,
+                        "rescue_triggered": rescue_triggered,
+                        "retry_attempts": retry_attempts,
+                        "spacing_angstrom": spacing,
+                    }
+                )
 
         rt = _get(data, "realspace_features.metadata.extraction_time_seconds")
         if isinstance(rt, (int, float)):
@@ -193,6 +304,34 @@ def build_report(
                 box[key]["critic2_success"] += 1
             if bader_non_null:
                 box[key]["bader_success"] += 1
+
+        if rescue_triggered:
+            rescue_stats["triggered_cases"] += 1
+            rescue_stats["final_stage_histogram"][str(stage or "unknown")] += 1
+            if bader_non_null:
+                rescue_stats["recovered_cases"] += 1
+            else:
+                rescue_stats["failed_cases"] += 1
+
+        # offline threshold scan candidate pool: critic2 success + bader unavailable + sum mismatch + valid sums.
+        if (
+            c2 == "success"
+            and bs == "unavailable"
+            and bcat == "bader_population_sum_mismatch"
+            and isinstance(expected_e, (int, float))
+            and isinstance(parsed_sum, (int, float))
+        ):
+            threshold_scan_candidates.append(
+                {
+                    "molecule_id": mid,
+                    "natm": natm,
+                    "expected_electrons": float(expected_e),
+                    "parsed_population_sum": float(parsed_sum),
+                    "abs_diff": abs(float(parsed_sum) - float(expected_e)),
+                    "rel_diff": abs(float(parsed_sum) - float(expected_e)) / max(1.0, abs(float(expected_e))),
+                    "validation_stage": stage,
+                }
+            )
 
     def enrich_rate_rows(rows: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Any]]:
         out: Dict[str, Dict[str, Any]] = {}
@@ -280,6 +419,30 @@ def build_report(
             "critic2_p90_seconds": _p90(timing_critic2),
         },
         "top_unavailable_examples": unavailable_examples[:20],
+        "mismatch_grouping": {
+            "count": int(sum(mismatch_abs_hist.values())),
+            "abs_diff_bin_histogram": dict(mismatch_abs_hist),
+            "rel_diff_bin_histogram": dict(mismatch_rel_hist),
+            "natm_bin_histogram": dict(mismatch_natm_hist),
+            "family_histogram": dict(mismatch_family_hist),
+            "spacing_bin_histogram": dict(mismatch_spacing_hist),
+            "polar_on_histogram": dict(mismatch_polar_on_hist),
+            "rescue_triggered_histogram": dict(mismatch_rescue_triggered_hist),
+            "validation_stage_histogram": dict(mismatch_validation_stage_hist),
+            "current_refined_config_histogram": dict(mismatch_current_refined_hist),
+            "examples": mismatch_examples[:30],
+        },
+        "rescue_retry": {
+            "triggered_cases": rescue_stats["triggered_cases"],
+            "recovered_cases": rescue_stats["recovered_cases"],
+            "failed_cases": rescue_stats["failed_cases"],
+            "recovery_rate_when_triggered": (
+                rescue_stats["recovered_cases"] / max(1, rescue_stats["triggered_cases"])
+            ),
+            "attempt_count_histogram": dict(rescue_stats["attempt_count_histogram"]),
+            "attempt_label_histogram": dict(rescue_stats["attempt_label_histogram"]),
+            "final_stage_histogram": dict(rescue_stats["final_stage_histogram"]),
+        },
     }
     if isinstance(baseline_reason_category_hist, dict):
         delta = {}
@@ -289,6 +452,41 @@ def build_report(
             base_v = int(baseline_reason_category_hist.get(k, 0))
             delta[k] = now_v - base_v
         report["unavailable_reason_histogram"]["category_delta_vs_baseline"] = delta
+
+    # Offline threshold sensitivity scan (analysis only, no logic change).
+    scan_rows: Dict[str, Any] = {}
+    baseline_pass = len(threshold_scan_candidates)  # current status for this pool: all failed
+    for policy_name, policy in DEFAULT_THRESHOLD_POLICIES.items():
+        abs_tol = float(policy["abs_tol_e"])
+        rel_tol = float(policy["rel_tol"])
+        rescued = []
+        for row in threshold_scan_candidates:
+            tol = max(abs_tol, rel_tol * max(1.0, abs(row["expected_electrons"])))
+            if row["abs_diff"] <= tol:
+                rescued.append(
+                    {
+                        "molecule_id": row["molecule_id"],
+                        "natm": row["natm"],
+                        "abs_diff": row["abs_diff"],
+                        "rel_diff": row["rel_diff"],
+                        "tol": tol,
+                        "validation_stage": row["validation_stage"],
+                    }
+                )
+        scan_rows[policy_name] = {
+            "policy": policy,
+            "candidate_pool_size": len(threshold_scan_candidates),
+            "additional_pass_cases": len(rescued),
+            "additional_pass_ratio_in_candidate_pool": (
+                len(rescued) / max(1, len(threshold_scan_candidates))
+            ),
+            "additional_pass_examples": rescued[:30],
+        }
+    report["offline_threshold_scan"] = {
+        "note": "analysis only; canonical writeback logic unchanged",
+        "baseline_candidate_pool_size": baseline_pass,
+        "policies": scan_rows,
+    }
 
     return report
 
