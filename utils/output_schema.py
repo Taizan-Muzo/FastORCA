@@ -186,6 +186,30 @@ class UnifiedOutputBuilder:
                     "bounding_box_diagonal_angstrom": None,
                     "heavy_atom_count_proxy": None
                 },
+                "proxy_family_summary_v1": {
+                    "available": False,
+                    "definition_version": "v1",
+                    "is_proxy": True,
+                    "atom_charge_dispersion_proxy": None,
+                    "hetero_atom_charge_extrema_proxy": None,
+                    "lone_pair_rich_atom_count_proxy": None,
+                    "bond_delocalization_extrema_proxy": None,
+                    "high_delocalization_bond_count_proxy": None,
+                    "metadata": {
+                        "candidate_set_scope": "single_optimized_geometry_current_run",
+                        "status": "not_attempted",
+                        "status_reason": "not_computed_yet",
+                        "atom_charge_dispersion_proxy_formula": "std(atom_features.atomic_charge_iao_proxy)",
+                        "hetero_atom_charge_extrema_proxy_formula": "extrema over non C/H atoms in atomic_charge_iao_proxy",
+                        "lone_pair_rich_atom_count_proxy_formula": "count(score >= 0.6) over atomic_lone_pair_heuristic_proxy",
+                        "bond_delocalization_extrema_proxy_formula": "min/max/mean/std over bond_delocalization_index_proxy_v1",
+                        "high_delocalization_bond_count_proxy_formula": "count(di >= 1.0) over bond_delocalization_index_proxy_v1",
+                        "limitations": [
+                            "proxy summaries aggregate existing proxy vectors",
+                            "not equivalent to exact qcMol external descriptors"
+                        ],
+                    },
+                },
                 "metadata": {
                     "homo_lumo_gap_hartree": {
                         "canonical_path": "global_features.dft.homo_lumo_gap_hartree",
@@ -304,6 +328,9 @@ class UnifiedOutputBuilder:
                 "atomic_density_partition_volume_proxy": {
                     "bader": None,
                 },
+                "atomic_density_partition_laplacian_proxy_v1": {
+                    "bader": None,
+                },
                 "atomic_lone_pair_heuristic_proxy": None,
                 "atomic_orbital_descriptor_proxy_v1": {
                     "n_dominant_ibo": None,
@@ -355,6 +382,26 @@ class UnifiedOutputBuilder:
                         "limitations": [
                             "units follow critic2 parsed output and may depend on cube/input convention",
                             "bader volume field may be null when external bridge is not executed or parsing fails",
+                        ],
+                    },
+                    "atomic_density_partition_laplacian_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "units": "critic2_integrated_laplacian_like_units",
+                        "field_order": ["bader"],
+                        "sources": {
+                            "bader": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.laplacian_integral"
+                        },
+                        "bader_status": "not_attempted",
+                        "bader_status_reason": "not_attempted_by_default",
+                        "bader_source_key": None,
+                        "bader_validation_stage": None,
+                        "bader_retry_attempted": False,
+                        "bader_retry_success": False,
+                        "limitations": [
+                            "depends on critic2 integrated-property table containing Lap-like column",
+                            "units/physical meaning follow critic2 integrated table conventions"
                         ],
                     },
                     "atomic_lone_pair_heuristic_proxy": {
@@ -509,6 +556,20 @@ class UnifiedOutputBuilder:
                     "random_seed": None,
                     "source": None,
                     "proxy_note": "requires dedicated conformer generation + ranking workflow in current run",
+                    "candidate_set_statistics_proxy_v1": {
+                        "available": False,
+                        "definition_version": "v1",
+                        "candidate_set_scope": "generated_optimized_ranked_candidate_set_current_run",
+                        "conformer_count_ranked": 0,
+                        "conformer_energy_span_proxy": None,
+                        "conformer_energy_std_proxy": None,
+                        "geometry_size_variability_proxy": None,
+                        "conformer_compactness_proxy_v1": None,
+                        "limitations": [
+                            "statistics are candidate-set summaries, not global conformer-space truth",
+                            "forcefield native energies are not directly thermodynamic free energies"
+                        ],
+                    },
                     "limitations": [],
                 },
             },
@@ -679,6 +740,9 @@ class UnifiedOutputBuilder:
                             "bader_volumes": None,
                             "n_bader_volumes": None,
                             "atomic_integrated_properties": None,
+                            "stable_atomic_integrated_properties_v1": None,
+                            "stable_atomic_integrated_property_summary_v1": None,
+                            "atomic_integrated_property_candidate_assessment_v1": None,
                             "metadata": {
                                 "analysis_type": None,
                                 "convergence_status": None,

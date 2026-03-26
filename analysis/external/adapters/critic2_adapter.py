@@ -4,7 +4,7 @@ critic2 量子化学分析工具适配器
 """
 
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import re
 import shutil
 from loguru import logger
@@ -367,8 +367,181 @@ class Critic2Adapter(ExternalAdapter):
                 logger.info(f"Parsed {len(charges2)} atomic properties from integrated table")
             else:
                 logger.warning("No Bader data found in output")
+
+        self._enrich_qtaim_high_value_integrated_properties(features["qtaim"])
         
         return features
+
+    def _pick_property_values_with_key(
+        self,
+        property_map: Any,
+        aliases: List[str],
+    ) -> Tuple[Optional[List[Optional[float]]], Optional[str]]:
+        """Pick one integrated-property column by aliases."""
+        if not isinstance(property_map, dict):
+            return None, None
+
+        def _norm(token: str) -> str:
+            return "".join(ch for ch in str(token).lower() if ch.isalnum())
+
+        normalized_aliases = [_norm(a) for a in aliases]
+        # exact
+        for alias in normalized_aliases:
+            for key, values in property_map.items():
+                if _norm(key) == alias and isinstance(values, list):
+                    return values, str(key)
+        # prefix
+        for alias in normalized_aliases:
+            for key, values in property_map.items():
+                if _norm(key).startswith(alias) and isinstance(values, list):
+                    return values, str(key)
+        # contains
+        for alias in normalized_aliases:
+            for key, values in property_map.items():
+                if alias and alias in _norm(key) and isinstance(values, list):
+                    return values, str(key)
+        return None, None
+
+    @staticmethod
+    def _coerce_numeric_list(values: Any) -> Optional[List[float]]:
+        """Coerce a list to numeric list if every element is numeric and not None."""
+        if not isinstance(values, list):
+            return None
+        out: List[float] = []
+        for v in values:
+            if v is None:
+                return None
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                return None
+        return out
+
+    @staticmethod
+    def _summary_stats(values: List[float]) -> Dict[str, Any]:
+        """Build compact summary stats for per-atom integrated vectors."""
+        if not values:
+            return {
+                "count": 0,
+                "sum": None,
+                "mean": None,
+                "std": None,
+                "min": None,
+                "max": None,
+                "abs_sum": None,
+            }
+        n = len(values)
+        total = float(sum(values))
+        mean = total / n
+        var = float(sum((x - mean) ** 2 for x in values) / n)
+        return {
+            "count": n,
+            "sum": total,
+            "mean": mean,
+            "std": var ** 0.5,
+            "min": float(min(values)),
+            "max": float(max(values)),
+            "abs_sum": float(sum(abs(x) for x in values)),
+        }
+
+    def _enrich_qtaim_high_value_integrated_properties(self, qtaim: Dict[str, Any]) -> None:
+        """
+        Build a stable high-value integrated-property layer from critic2 outputs.
+
+        Adds:
+        - stable_atomic_integrated_properties_v1
+        - stable_atomic_integrated_property_summary_v1
+        - atomic_integrated_property_candidate_assessment_v1
+        """
+        integrated = qtaim.get("atomic_integrated_properties")
+        if not isinstance(integrated, dict):
+            integrated = {}
+
+        candidate_specs = [
+            {
+                "key": "population_e",
+                "aliases": ["Pop", "Population", "ElectronPopulation", "ElectronPop"],
+                "fallback_key": "bader_populations",
+                "expected_reliability": "high",
+                "value_type": "electron_population",
+            },
+            {
+                "key": "laplacian_integral",
+                "aliases": ["Lap", "Laplacian", "Lapl"],
+                "fallback_key": None,
+                "expected_reliability": "medium_high",
+                "value_type": "integrated_laplacian_like",
+            },
+            {
+                "key": "volume",
+                "aliases": ["Volume", "Vol"],
+                "fallback_key": "bader_volumes",
+                "expected_reliability": "medium_low",
+                "value_type": "basin_volume",
+            },
+        ]
+
+        stable_values: Dict[str, Optional[List[float]]] = {
+            "population_e": None,
+            "laplacian_integral": None,
+            "volume": None,
+        }
+        summary_values: Dict[str, Optional[Dict[str, Any]]] = {
+            "population_e": None,
+            "laplacian_integral": None,
+            "volume": None,
+        }
+        candidate_assessment: Dict[str, Dict[str, Any]] = {}
+
+        for spec in candidate_specs:
+            raw_values, source_col = self._pick_property_values_with_key(integrated, spec["aliases"])
+            source_key = None
+            if raw_values is not None and source_col is not None:
+                source_key = f"atomic_integrated_properties.{source_col}"
+
+            if raw_values is None and spec["fallback_key"]:
+                fb = qtaim.get(spec["fallback_key"])
+                if isinstance(fb, list):
+                    raw_values = fb
+                    source_key = spec["fallback_key"]
+
+            values = self._coerce_numeric_list(raw_values)
+            if values is not None and len(values) > 0:
+                stable_values[spec["key"]] = values
+                summary_values[spec["key"]] = self._summary_stats(values)
+                candidate_assessment[spec["key"]] = {
+                    "status": "implemented",
+                    "source_key": source_key,
+                    "reason": "numeric_vector_available",
+                    "value_type": spec["value_type"],
+                    "expected_reliability": spec["expected_reliability"],
+                }
+            else:
+                reason = "column_missing_or_non_numeric"
+                status = "partial"
+                if spec["key"] == "population_e":
+                    status = "rejected"
+                    reason = "population_column_missing_or_non_numeric"
+                candidate_assessment[spec["key"]] = {
+                    "status": status,
+                    "source_key": source_key,
+                    "reason": reason,
+                    "value_type": spec["value_type"],
+                    "expected_reliability": spec["expected_reliability"],
+                }
+
+        # Additional candidate intentionally rejected for redundancy/noise.
+        candidate_assessment["rho_integral"] = {
+            "status": "rejected",
+            "source_key": None,
+            "reason": "not_stably_reported_across_runs_or_redundant_with_population",
+            "value_type": "density_related_integral",
+            "expected_reliability": "low",
+        }
+
+        qtaim["stable_atomic_integrated_properties_v1"] = stable_values
+        qtaim["stable_atomic_integrated_property_summary_v1"] = summary_values
+        qtaim["atomic_integrated_property_candidate_assessment_v1"] = candidate_assessment
 
     @staticmethod
     def _normalize_column_name(token: str) -> str:

@@ -1528,6 +1528,9 @@ class FeatureExtractor:
             atomic_density_partition_volume_proxy={
                 "bader": None,
             },
+            atomic_density_partition_laplacian_proxy_v1={
+                "bader": None,
+            },
         )
         
         # ============ 步骤 9: 提取 Fock 矩阵（可选） ============
@@ -1992,6 +1995,9 @@ class FeatureExtractor:
         # 同步 Bader 写回到 atom-level proxy，并明确区分
         # success / unavailable / not_attempted 语义
         self._sync_bader_partition_proxy_from_external(builder, molecule_id, mol=mol, mf=mf)
+
+        # High-value proxy-family aggregations (stability-first, low-cost companion summaries).
+        self._compute_high_value_proxy_family_summary_v1(builder=builder, molecule_id=molecule_id)
         
         # 长度校验 (M5: 记录 reason codes)
         valid, mismatch_reasons = self._validate_feature_lengths(builder, molecule_id)
@@ -2023,6 +2029,138 @@ class FeatureExtractor:
         )
         
         return result
+
+    def _compute_high_value_proxy_family_summary_v1(
+        self,
+        builder: UnifiedOutputBuilder,
+        molecule_id: str,
+    ) -> None:
+        """
+        Compute compact high-value proxy summaries for downstream consumption.
+        """
+        data = builder.data
+        atom_feat = (data.get("atom_features") or {})
+        bond_feat = (data.get("bond_features") or {})
+        atom_symbols = (data.get("geometry") or {}).get("atom_symbols") or []
+
+        summary = {
+            "available": False,
+            "definition_version": "v1",
+            "is_proxy": True,
+            "atom_charge_dispersion_proxy": None,
+            "hetero_atom_charge_extrema_proxy": None,
+            "lone_pair_rich_atom_count_proxy": None,
+            "bond_delocalization_extrema_proxy": None,
+            "high_delocalization_bond_count_proxy": None,
+            "metadata": {
+                "candidate_set_scope": "single_optimized_geometry_current_run",
+                "status": "unavailable",
+                "status_reason": "proxy_inputs_missing",
+                "atom_charge_dispersion_proxy_formula": "std(atom_features.atomic_charge_iao_proxy)",
+                "hetero_atom_charge_extrema_proxy_formula": "extrema over non C/H atoms in atomic_charge_iao_proxy",
+                "lone_pair_rich_atom_count_proxy_formula": "count(score >= 0.6) over atomic_lone_pair_heuristic_proxy",
+                "bond_delocalization_extrema_proxy_formula": "min/max/mean/std over bond_delocalization_index_proxy_v1",
+                "high_delocalization_bond_count_proxy_formula": "count(di >= 1.0) over bond_delocalization_index_proxy_v1",
+                "limitations": [
+                    "proxy summaries aggregate existing proxy vectors",
+                    "not equivalent to exact qcMol external descriptors",
+                ],
+            },
+        }
+
+        computed_any = False
+        reasons: List[str] = []
+
+        charges = atom_feat.get("atomic_charge_iao_proxy")
+        if isinstance(charges, list) and len(charges) > 0:
+            try:
+                charge_vals = [float(x) for x in charges]
+                c_mean = float(sum(charge_vals) / len(charge_vals))
+                c_std = float(np.sqrt(np.mean([(x - c_mean) ** 2 for x in charge_vals])))
+                summary["atom_charge_dispersion_proxy"] = c_std
+                computed_any = True
+
+                hetero_idxs = [
+                    i for i, sym in enumerate(atom_symbols)
+                    if str(sym).upper() not in {"C", "H"}
+                ]
+                if hetero_idxs:
+                    hetero_vals = [(i, charge_vals[i]) for i in hetero_idxs if i < len(charge_vals)]
+                    if hetero_vals:
+                        idx_min, v_min = min(hetero_vals, key=lambda x: x[1])
+                        idx_max, v_max = max(hetero_vals, key=lambda x: x[1])
+                        h_values = [v for _, v in hetero_vals]
+                        summary["hetero_atom_charge_extrema_proxy"] = {
+                            "count": len(h_values),
+                            "min": float(v_min),
+                            "max": float(v_max),
+                            "mean": float(sum(h_values) / len(h_values)),
+                            "atom_index_min": int(idx_min),
+                            "atom_index_max": int(idx_max),
+                        }
+                        computed_any = True
+            except Exception:
+                reasons.append("atomic_charge_iao_proxy_non_numeric")
+        else:
+            reasons.append("atomic_charge_iao_proxy_missing")
+
+        lp_scores = atom_feat.get("atomic_lone_pair_heuristic_proxy")
+        lp_threshold = 0.6
+        if isinstance(lp_scores, list) and len(lp_scores) > 0:
+            try:
+                lp_vals = [float(x) for x in lp_scores]
+                lp_count = int(sum(1 for x in lp_vals if x >= lp_threshold))
+                summary["lone_pair_rich_atom_count_proxy"] = {
+                    "threshold": lp_threshold,
+                    "count": lp_count,
+                    "ratio": float(lp_count / len(lp_vals)),
+                }
+                computed_any = True
+            except Exception:
+                reasons.append("atomic_lone_pair_heuristic_proxy_non_numeric")
+        else:
+            reasons.append("atomic_lone_pair_heuristic_proxy_missing")
+
+        di_vals = bond_feat.get("bond_delocalization_index_proxy_v1")
+        di_threshold = 1.0
+        if isinstance(di_vals, list) and len(di_vals) > 0:
+            try:
+                di = [float(x) for x in di_vals]
+                d_mean = float(sum(di) / len(di))
+                d_std = float(np.sqrt(np.mean([(x - d_mean) ** 2 for x in di])))
+                summary["bond_delocalization_extrema_proxy"] = {
+                    "count": len(di),
+                    "min": float(min(di)),
+                    "max": float(max(di)),
+                    "mean": d_mean,
+                    "std": d_std,
+                }
+                high_count = int(sum(1 for x in di if x >= di_threshold))
+                summary["high_delocalization_bond_count_proxy"] = {
+                    "threshold": di_threshold,
+                    "count": high_count,
+                    "ratio": float(high_count / len(di)),
+                }
+                computed_any = True
+            except Exception:
+                reasons.append("bond_delocalization_index_proxy_v1_non_numeric")
+        else:
+            reasons.append("bond_delocalization_index_proxy_v1_missing")
+
+        summary["available"] = bool(computed_any)
+        if computed_any:
+            summary["metadata"]["status"] = "success"
+            summary["metadata"]["status_reason"] = "ok"
+            summary["metadata"]["input_warnings"] = reasons
+        else:
+            summary["metadata"]["status"] = "unavailable"
+            summary["metadata"]["status_reason"] = "|".join(reasons) if reasons else "proxy_inputs_missing"
+
+        data["global_features"]["proxy_family_summary_v1"] = summary
+        logger.debug(
+            f"[{molecule_id}] proxy_family_summary_v1 status={summary['metadata']['status']}, "
+            f"reason={summary['metadata']['status_reason']}"
+        )
 
     def _normalize_availability_status(self, raw_status: Any) -> str:
         """
@@ -2209,6 +2347,9 @@ class FeatureExtractor:
         natm = data.get("molecule_info", {}).get("natm")
         qtaim_meta = qtaim.get("metadata") if isinstance(qtaim.get("metadata"), dict) else {}
         atomic_integrated_properties = qtaim.get("atomic_integrated_properties")
+        stable_integrated = qtaim.get("stable_atomic_integrated_properties_v1")
+        if not isinstance(stable_integrated, dict):
+            stable_integrated = {}
 
         bader_population_values = qtaim.get("bader_populations")
         bader_population_source_key = "qtaim.bader_populations"
@@ -2220,6 +2361,37 @@ class FeatureExtractor:
             if picked_values is not None:
                 bader_population_values = picked_values
                 bader_population_source_key = f"qtaim.atomic_integrated_properties.{picked_key}"
+
+        # High-value companion: integrated Lap-like quantity per basin.
+        lap_values = stable_integrated.get("laplacian_integral")
+        lap_source_key = "qtaim.stable_atomic_integrated_properties_v1.laplacian_integral"
+        if lap_values is None:
+            picked_lap, picked_lap_key = self._pick_external_integrated_property_values(
+                atomic_integrated_properties,
+                aliases=["Lap", "Laplacian", "Lapl"],
+            )
+            if picked_lap is not None:
+                lap_values = picked_lap
+                lap_source_key = f"qtaim.atomic_integrated_properties.{picked_lap_key}"
+        lap_status, lap_reason, lap_values_assessed = self._assess_external_array_availability(
+            execution_status=execution_status,
+            values=lap_values,
+            natm=natm,
+            field_name="bader_laplacian_integral",
+        )
+        lap_values_clean: Optional[List[float]] = None
+        if lap_status == "success" and isinstance(lap_values_assessed, list):
+            try:
+                lap_values_clean = [float(v) for v in lap_values_assessed]
+            except (TypeError, ValueError):
+                lap_status = "unavailable"
+                lap_reason = "bader_laplacian_integral_non_numeric_values"
+                lap_values_clean = None
+            else:
+                if any(v is None for v in lap_values_assessed):
+                    lap_status = "unavailable"
+                    lap_reason = "bader_laplacian_integral_contains_null"
+                    lap_values_clean = None
 
         bader_population_status, bader_population_reason, bader_populations = self._assess_external_array_availability(
             execution_status=execution_status,
@@ -2334,6 +2506,10 @@ class FeatureExtractor:
             "population_sum_tolerance": population_sum_tolerance,
             "bader_population_source_key": bader_population_source_key,
             "bader_volume_source_key": bader_volume_source_key,
+            "bader_laplacian_status": lap_status,
+            "bader_laplacian_reason": lap_reason,
+            "bader_laplacian_values": lap_values_clean,
+            "bader_laplacian_source_key": lap_source_key,
             "bader_population_reason": bader_population_reason,
             "bader_population_status": bader_population_status,
             "parser_note": parser_note,
@@ -2601,6 +2777,9 @@ class FeatureExtractor:
         bader_volume_status = eval_result["bader_volume_status"]
         bader_volume_reason = eval_result["bader_volume_reason"]
         bader_volumes = eval_result["bader_volumes"]
+        bader_laplacian_status = eval_result.get("bader_laplacian_status", "not_attempted")
+        bader_laplacian_reason = eval_result.get("bader_laplacian_reason", "not_attempted_by_default")
+        bader_laplacian_values = eval_result.get("bader_laplacian_values")
 
         if retry_attempt_records:
             warnings = list((((data.get("external_bridge") or {}).get("critic2") or {}).get("warnings")) or [])
@@ -2632,6 +2811,9 @@ class FeatureExtractor:
                 "bader": bader_charges,
             },
             atomic_density_partition_volume_proxy={"bader": bader_volumes},
+            atomic_density_partition_laplacian_proxy_v1={
+                "bader": bader_laplacian_values if bader_laplacian_status == "success" else None
+            },
         )
         builder.set_atom_metadata(
             "atomic_density_partition_charge_proxy",
@@ -2639,6 +2821,15 @@ class FeatureExtractor:
             bader_status_reason=bader_charge_reason,
             bader_volume_status=bader_volume_status,
             bader_volume_status_reason=bader_volume_reason,
+        )
+        builder.set_atom_metadata(
+            "atomic_density_partition_laplacian_proxy_v1",
+            bader_status=bader_laplacian_status,
+            bader_status_reason=bader_laplacian_reason,
+            bader_source_key=eval_result.get("bader_laplacian_source_key"),
+            bader_validation_stage=validation_stage,
+            bader_retry_attempted=bool(retry_attempt_records),
+            bader_retry_success=any(bool(x.get("success")) for x in retry_attempt_records),
         )
 
         charge_meta = data.get("atom_features", {}).get("metadata", {}).get("atomic_density_partition_charge_proxy")
@@ -2650,6 +2841,7 @@ class FeatureExtractor:
             charge_meta["bader_population_sum_tol_rel"] = self.BADER_POPULATION_SUM_REL_TOL
             charge_meta["bader_population_source"] = eval_result["bader_population_source_key"]
             charge_meta["bader_volume_source"] = eval_result["bader_volume_source_key"]
+            charge_meta["bader_laplacian_source"] = eval_result.get("bader_laplacian_source_key")
             charge_meta["bader_population_parser_note"] = eval_result["parser_note"]
             charge_meta["bader_population_status"] = eval_result["bader_population_status"]
             charge_meta["bader_population_status_reason"] = eval_result["bader_population_reason"]
@@ -2674,6 +2866,7 @@ class FeatureExtractor:
         logger.debug(
             f"[{molecule_id}] Bader proxy sync: execution_status={execution_status}, "
             f"charge_status={bader_charge_status}, volume_status={bader_volume_status}, "
+            f"laplacian_status={bader_laplacian_status}, "
             f"stage={validation_stage}"
         )
 
@@ -2695,6 +2888,19 @@ class FeatureExtractor:
         energy_dedup_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """构建 most_stable_conformation 的默认 proxy 结构。"""
+        candidate_stats = {
+            "available": False,
+            "definition_version": "v1",
+            "candidate_set_scope": "generated_optimized_ranked_candidate_set_current_run",
+            "conformer_count_ranked": int(n_conformers_ranked),
+            "conformer_energy_span_proxy": None,
+            "conformer_energy_std_proxy": None,
+            "geometry_size_variability_proxy": None,
+            "conformer_compactness_proxy_v1": None,
+            "limitations": [
+                "candidate-set statistics unavailable because conformer ranking did not produce usable set",
+            ],
+        }
         return {
             "available": False,
             "is_proxy": True,
@@ -2718,10 +2924,117 @@ class FeatureExtractor:
             "random_seed": int(random_seed),
             "source": source,
             "proxy_note": proxy_note,
+            "candidate_set_statistics_proxy_v1": candidate_stats,
             "limitations": [
                 "not guaranteed to be global most stable conformation",
                 "force-field ranking only (MMFF94 or UFF), not quantum-level conformer free-energy ranking",
                 "energy dedup uses forcefield native energy units",
+            ],
+        }
+
+    def _compute_conformer_bbox_diag_angstrom(self, mol_rdkit: Chem.Mol, conformer_id: int) -> Optional[float]:
+        """Compute conformer bounding-box diagonal in angstrom."""
+        try:
+            conf = mol_rdkit.GetConformer(int(conformer_id))
+            coords = np.asarray(conf.GetPositions(), dtype=float)
+            if coords.ndim != 2 or coords.shape[1] != 3 or coords.shape[0] == 0:
+                return None
+            cmin = np.min(coords, axis=0)
+            cmax = np.max(coords, axis=0)
+            return float(np.linalg.norm(cmax - cmin))
+        except Exception:
+            return None
+
+    def _compute_conformer_radius_gyration_angstrom(self, mol_rdkit: Chem.Mol, conformer_id: int) -> Optional[float]:
+        """Compute conformer radius-of-gyration-like compactness in angstrom."""
+        try:
+            conf = mol_rdkit.GetConformer(int(conformer_id))
+            coords = np.asarray(conf.GetPositions(), dtype=float)
+            if coords.ndim != 2 or coords.shape[1] != 3 or coords.shape[0] == 0:
+                return None
+            center = np.mean(coords, axis=0)
+            rg = float(np.sqrt(np.mean(np.sum((coords - center) ** 2, axis=1))))
+            return rg
+        except Exception:
+            return None
+
+    def _build_conformer_candidate_statistics_proxy_v1(
+        self,
+        mol_rdkit: Chem.Mol,
+        ranked_items: List[Tuple[int, float]],
+    ) -> Dict[str, Any]:
+        """Build candidate-set statistics for conformer-aware geometry enhancement."""
+        energies = [float(e) for _, e in ranked_items]
+        n = len(energies)
+        if n <= 0:
+            return {
+                "available": False,
+                "definition_version": "v1",
+                "candidate_set_scope": "generated_optimized_ranked_candidate_set_current_run",
+                "conformer_count_ranked": 0,
+                "conformer_energy_span_proxy": None,
+                "conformer_energy_std_proxy": None,
+                "geometry_size_variability_proxy": None,
+                "conformer_compactness_proxy_v1": None,
+                "limitations": [
+                    "candidate-set statistics unavailable because ranked conformers are empty"
+                ],
+            }
+
+        bbox_diags: List[float] = []
+        radii: List[float] = []
+        for cid, _ in ranked_items:
+            d = self._compute_conformer_bbox_diag_angstrom(mol_rdkit, cid)
+            if isinstance(d, float):
+                bbox_diags.append(d)
+            rg = self._compute_conformer_radius_gyration_angstrom(mol_rdkit, cid)
+            if isinstance(rg, float):
+                radii.append(rg)
+
+        energy_mean = float(sum(energies) / n)
+        energy_std = float(np.sqrt(np.mean([(x - energy_mean) ** 2 for x in energies]))) if n > 0 else None
+        energy_span = float(max(energies) - min(energies)) if n > 0 else None
+
+        geom_var = None
+        if bbox_diags:
+            g_mean = float(sum(bbox_diags) / len(bbox_diags))
+            g_std = float(np.sqrt(np.mean([(x - g_mean) ** 2 for x in bbox_diags])))
+            geom_var = {
+                "metric": "bounding_box_diagonal_angstrom",
+                "count": len(bbox_diags),
+                "min": float(min(bbox_diags)),
+                "max": float(max(bbox_diags)),
+                "mean": g_mean,
+                "std": g_std,
+                "span": float(max(bbox_diags) - min(bbox_diags)),
+            }
+
+        compactness = None
+        if radii:
+            r_mean = float(sum(radii) / len(radii))
+            r_std = float(np.sqrt(np.mean([(x - r_mean) ** 2 for x in radii])))
+            compactness = {
+                "metric": "radius_of_gyration_angstrom",
+                "count": len(radii),
+                "min": float(min(radii)),
+                "max": float(max(radii)),
+                "mean": r_mean,
+                "std": r_std,
+                "span": float(max(radii) - min(radii)),
+            }
+
+        return {
+            "available": True,
+            "definition_version": "v1",
+            "candidate_set_scope": "generated_optimized_ranked_candidate_set_current_run",
+            "conformer_count_ranked": int(n),
+            "conformer_energy_span_proxy": energy_span,
+            "conformer_energy_std_proxy": energy_std,
+            "geometry_size_variability_proxy": geom_var,
+            "conformer_compactness_proxy_v1": compactness,
+            "limitations": [
+                "candidate-set statistics; not exhaustive conformer-space descriptors",
+                "forcefield native energies are proxy quantities, not free energies",
             ],
         }
 
@@ -2872,6 +3185,10 @@ class FeatureExtractor:
                 )
 
             best_cid, best_energy = deduped_ranked[0]
+            candidate_stats = self._build_conformer_candidate_statistics_proxy_v1(
+                mol_rdkit=mol_work,
+                ranked_items=deduped_ranked,
+            )
             limitations = [
                 "candidate-set minimum only, not an exhaustive conformer search",
                 "force-field ranking only (MMFF94/UFF), not quantum free-energy ranking",
@@ -2911,6 +3228,7 @@ class FeatureExtractor:
                 "random_seed": int(random_seed),
                 "source": "rdkit_etkdg_forcefield_ranking",
                 "proxy_note": "Selected within current candidate set; not guaranteed global most stable conformation.",
+                "candidate_set_statistics_proxy_v1": candidate_stats,
                 "limitations": limitations,
             }
         except Exception as e:
@@ -3349,6 +3667,17 @@ class FeatureExtractor:
                     f"has {len(arr)} elements, expected {natm} (natm)"
                 )
                 reason_codes.append("atom_feature_length_mismatch_atomic_density_partition_volume_proxy_bader")
+
+        # 1.1.2 检查 atomic_density_partition_laplacian_proxy_v1 子字段长度
+        lap_partition = atom_feat.get("atomic_density_partition_laplacian_proxy_v1")
+        if isinstance(lap_partition, dict):
+            arr = lap_partition.get("bader")
+            if isinstance(arr, list) and len(arr) != natm:
+                logger.warning(
+                    f"[{molecule_id}] Length mismatch: atomic_density_partition_laplacian_proxy_v1.bader "
+                    f"has {len(arr)} elements, expected {natm} (natm)"
+                )
+                reason_codes.append("atom_feature_length_mismatch_atomic_density_partition_laplacian_proxy_v1_bader")
 
         # 1.2 检查 atomic_orbital_descriptor_proxy_v1 固定 shape
         descriptor = atom_feat.get("atomic_orbital_descriptor_proxy_v1")

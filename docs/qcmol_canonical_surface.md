@@ -20,6 +20,7 @@ Schema stays unchanged; this list only defines the preferred consumption subset.
 - `global_features.dft.dipole_moment_debye` (`implemented_exact`)
 - `global_features.rdkit.molecular_weight` (`implemented_exact`)
 - `global_features.geometry_size.bounding_box_diagonal_angstrom` (`implemented_proxy`)
+- `global_features.proxy_family_summary_v1` (`implemented_proxy`, high-value aggregate companion block)
 
 ## Atom-Level
 
@@ -31,6 +32,7 @@ Schema stays unchanged; this list only defines the preferred consumption subset.
 - `atom_features.atomic_density_partition_charge_proxy.hirshfeld` (`implemented_proxy`)
 - `atom_features.atomic_density_partition_charge_proxy.cm5` (`implemented_proxy`)
 - `atom_features.atomic_density_partition_charge_proxy.bader` (`implemented_proxy`, validation-gated)
+- `atom_features.atomic_density_partition_laplacian_proxy_v1.bader` (`implemented_proxy`, critic2 integrated Lap companion)
 - `atom_features.atomic_lone_pair_heuristic_proxy` (`implemented_proxy`)
 - `atom_features.atomic_orbital_descriptor_proxy_v1` (`implemented_proxy`)
 
@@ -49,6 +51,7 @@ Schema stays unchanged; this list only defines the preferred consumption subset.
 
 - `structural_features.optimized_3d_geometry` (`partial`)
 - `structural_features.most_stable_conformation` (`implemented_proxy`)
+- `structural_features.most_stable_conformation.candidate_set_statistics_proxy_v1` (`implemented_proxy`, candidate-set statistics)
 
 ## Realspace
 
@@ -63,6 +66,8 @@ Schema stays unchanged; this list only defines the preferred consumption subset.
 
 - `external_bridge.critic2` (`implemented_exact` execution contract)
 - `external_features.critic2.qtaim` (`implemented_proxy`, raw parsed payload)
+- `external_features.critic2.qtaim.stable_atomic_integrated_properties_v1` (`implemented_proxy`, curated critic2 integrated layer)
+- `external_features.critic2.qtaim.atomic_integrated_property_candidate_assessment_v1` (`implemented_proxy`, implemented/partial/rejected decisions)
 - `atom_features.atomic_density_partition_charge_proxy.bader` (`implemented_proxy`, validated writeback)
 - `atom_features.atomic_density_partition_volume_proxy.bader` (`partial`, optional)
 

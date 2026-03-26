@@ -63,3 +63,15 @@ The script writes:
 
 - unified outputs + batch summary in output dir
 - `qcmol_substitute_profile_snapshot.json` for reproducible delivery config
+
+## Optional Post-Run Augmentation Validation
+
+Use:
+
+- `scripts/high_value_rare_feature_validation.py`
+
+to summarize availability/sample values of:
+
+- critic2 integrated high-value layer
+- conformer-aware candidate-set statistics
+- proxy-family aggregate summaries

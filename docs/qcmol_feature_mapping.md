@@ -224,6 +224,23 @@ Frozen formulas/constraints:
 - Recommended consumer read-surface:
   - see `docs/qcmol_canonical_surface.md`
 
+## High-Value / Rare-Feature Augmentation (v1)
+
+- Critic2 integrated-property curation:
+  - `external_features.critic2.qtaim.stable_atomic_integrated_properties_v1`
+  - `external_features.critic2.qtaim.stable_atomic_integrated_property_summary_v1`
+  - `external_features.critic2.qtaim.atomic_integrated_property_candidate_assessment_v1`
+  - candidate status enum: `implemented | partial | rejected`
+- New atom-level companion proxy:
+  - `atom_features.atomic_density_partition_laplacian_proxy_v1.bader`
+  - source: curated critic2 Lap-like integrated column when available
+- Conformer-aware companion statistics:
+  - `structural_features.most_stable_conformation.candidate_set_statistics_proxy_v1`
+  - includes energy span/std + size variability + compactness proxy
+- Molecule-level proxy aggregate companion:
+  - `global_features.proxy_family_summary_v1`
+  - stability-first summaries over IAO charge / LP heuristic / bond DI vectors
+
 ## bond_indices Semantics
 
 - `bond_indices` is a bond list aligned to all bond-level arrays in the same order.

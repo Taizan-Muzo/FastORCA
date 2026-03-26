@@ -87,6 +87,7 @@ CANONICAL_SURFACE_ITEMS: List[Dict[str, Any]] = [
     {"group": "atom", "path": "atom_features.atomic_density_partition_charge_proxy.hirshfeld", "status": "implemented_proxy"},
     {"group": "atom", "path": "atom_features.atomic_density_partition_charge_proxy.cm5", "status": "implemented_proxy"},
     {"group": "atom", "path": "atom_features.atomic_density_partition_charge_proxy.bader", "status": "implemented_proxy"},
+    {"group": "atom", "path": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader", "status": "implemented_proxy"},
     {"group": "atom", "path": "atom_features.atomic_lone_pair_heuristic_proxy", "status": "implemented_proxy"},
     {"group": "atom", "path": "atom_features.atomic_orbital_descriptor_proxy_v1", "status": "implemented_proxy"},
     {"group": "bond", "path": "bond_features.bond_indices", "status": "implemented_exact"},
@@ -99,6 +100,7 @@ CANONICAL_SURFACE_ITEMS: List[Dict[str, Any]] = [
     {"group": "bond", "path": "bond_features.bond_stereo_info", "status": "implemented_proxy"},
     {"group": "structural", "path": "structural_features.optimized_3d_geometry", "status": "partial"},
     {"group": "structural", "path": "structural_features.most_stable_conformation", "status": "implemented_proxy"},
+    {"group": "structural", "path": "structural_features.most_stable_conformation.candidate_set_statistics_proxy_v1", "status": "implemented_proxy"},
     {"group": "realspace", "path": "realspace_features.density_isosurface_area", "status": "implemented_exact"},
     {"group": "realspace", "path": "realspace_features.density_isosurface_volume", "status": "implemented_exact"},
     {"group": "realspace", "path": "realspace_features.density_sphericity_like", "status": "implemented_proxy"},
@@ -109,6 +111,7 @@ CANONICAL_SURFACE_ITEMS: List[Dict[str, Any]] = [
     {"group": "external", "path": "external_features.critic2.qtaim", "status": "implemented_proxy"},
     {"group": "external", "path": "atom_features.atomic_density_partition_charge_proxy.bader", "status": "implemented_proxy"},
     {"group": "external", "path": "atom_features.atomic_density_partition_volume_proxy.bader", "status": "partial"},
+    {"group": "global", "path": "global_features.proxy_family_summary_v1", "status": "implemented_proxy"},
 ]
 
 
