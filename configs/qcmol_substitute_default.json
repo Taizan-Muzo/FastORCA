@@ -1,0 +1,74 @@
+{
+  "profile_id": "qcmol_substitute_default",
+  "profile_version": "2026-03-26",
+  "goal": "default_delivery_stability_first_open_source_substitute_mainline",
+  "description": "Recommended default profile for qcMol substitute delivery. Prioritizes stable end-to-end availability with validated Bader writeback.",
+  "execution": {
+    "run_mode": "full",
+    "artifact_policy": "keep_failed_only",
+    "n_workers": 1
+  },
+  "plugins": {
+    "orbital_features": {
+      "enabled": true,
+      "run_in_fast_mode": false,
+      "run_in_full_mode": true,
+      "timeout_seconds": 60,
+      "max_atoms": 100,
+      "fast_mode_override": "skip"
+    },
+    "realspace_features": {
+      "enabled": true,
+      "run_in_fast_mode": false,
+      "run_in_full_mode": true,
+      "timeout_seconds": 120,
+      "max_atoms": 50,
+      "max_total_grid_points": 1000000,
+      "runtime_config": {
+        "grid_resolution_angstrom": 0.2,
+        "margin_angstrom": 4.0,
+        "max_atoms": 50,
+        "max_total_grid_points": 1000000,
+        "realspace_core_features_enabled": true,
+        "realspace_core_features_expected": true,
+        "realspace_extended_features_enabled": true,
+        "realspace_extended_features_expected": true,
+        "required_artifacts": [
+          "density"
+        ],
+        "optional_artifacts": [
+          "homo",
+          "lumo"
+        ]
+      }
+    },
+    "critic2_bridge": {
+      "enabled": true,
+      "run_in_fast_mode": false,
+      "run_in_full_mode": true,
+      "timeout_seconds": 300,
+      "max_atoms": 100,
+      "executable_path": "critic2"
+    }
+  },
+  "bader_validation": {
+    "population_sum_tolerance": {
+      "abs_tol_e": 0.5,
+      "rel_tol": 0.02
+    },
+    "refined_retry": {
+      "enabled": true,
+      "grid_resolution_angstrom": 0.16,
+      "margin_angstrom": 5.5,
+      "max_points_per_dimension": 180,
+      "max_total_grid_points": 3000000
+    },
+    "rescue_retry": {
+      "enabled": true,
+      "grid_resolution_angstrom": 0.14,
+      "margin_angstrom": 6.0,
+      "max_points_per_dimension": 220,
+      "max_total_grid_points": 5000000
+    }
+  }
+}

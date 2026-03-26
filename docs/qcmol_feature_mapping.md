@@ -212,6 +212,18 @@ Frozen formulas/constraints:
   - `scripts/bader_coverage_uplift_report.py`
   - Supports baseline comparison via `--baseline-report <validation_round_report.json>`.
 
+## Consolidation Default Profile (v1)
+
+- Frozen default-delivery profile:
+  - `configs/qcmol_substitute_default.json`
+  - profile id: `qcmol_substitute_default`
+- Canonical one-command entry:
+  - `scripts/run_qcmol_substitute_default.py`
+- Consolidated readiness report generator:
+  - `scripts/qcmol_substitute_readiness_report.py`
+- Recommended consumer read-surface:
+  - see `docs/qcmol_canonical_surface.md`
+
 ## bond_indices Semantics
 
 - `bond_indices` is a bond list aligned to all bond-level arrays in the same order.
