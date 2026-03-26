@@ -1996,6 +1996,12 @@ class FeatureExtractor:
         # success / unavailable / not_attempted 语义
         self._sync_bader_partition_proxy_from_external(builder, molecule_id, mol=mol, mf=mf)
 
+        # Deepening A: critic2/basin high-value aligned summary layer.
+        self._compute_basin_family_summary_v1(builder=builder, molecule_id=molecule_id)
+
+        # Deepening B: atom/bond localized proxy enhancement layer.
+        self._compute_atom_bond_alignment_deepening_proxy_v1(builder=builder, molecule_id=molecule_id)
+
         # High-value proxy-family aggregations (stability-first, low-cost companion summaries).
         self._compute_high_value_proxy_family_summary_v1(builder=builder, molecule_id=molecule_id)
         
@@ -2042,6 +2048,8 @@ class FeatureExtractor:
         atom_feat = (data.get("atom_features") or {})
         bond_feat = (data.get("bond_features") or {})
         atom_symbols = (data.get("geometry") or {}).get("atom_symbols") or []
+        natm = (data.get("molecule_info") or {}).get("natm")
+        natm_int = int(natm) if isinstance(natm, int) and natm >= 0 else None
 
         summary = {
             "available": False,
@@ -2052,6 +2060,12 @@ class FeatureExtractor:
             "lone_pair_rich_atom_count_proxy": None,
             "bond_delocalization_extrema_proxy": None,
             "high_delocalization_bond_count_proxy": None,
+            "polarity_heterogeneity_proxy_v1": None,
+            "basin_charge_asymmetry_proxy_v1": None,
+            "localized_vs_delocalized_balance_proxy_v1": None,
+            "conformer_sensitivity_proxy_v1": None,
+            "electronic_compactness_proxy_v1": None,
+            "lone_pair_driven_polarity_proxy_v1": None,
             "metadata": {
                 "candidate_set_scope": "single_optimized_geometry_current_run",
                 "status": "unavailable",
@@ -2061,6 +2075,12 @@ class FeatureExtractor:
                 "lone_pair_rich_atom_count_proxy_formula": "count(score >= 0.6) over atomic_lone_pair_heuristic_proxy",
                 "bond_delocalization_extrema_proxy_formula": "min/max/mean/std over bond_delocalization_index_proxy_v1",
                 "high_delocalization_bond_count_proxy_formula": "count(di >= 1.0) over bond_delocalization_index_proxy_v1",
+                "polarity_heterogeneity_proxy_v1_formula": "std(charge_ref) * (1 + hetero_atom_fraction), charge_ref prefers validated bader then IAO",
+                "basin_charge_asymmetry_proxy_v1_formula": "mean(abs(bader_charge_i)) with signed charge-sum companions when bader charge is validated",
+                "localized_vs_delocalized_balance_proxy_v1_formula": "mean((loc_i - di_i)/(abs(loc_i)+abs(di_i)+1e-8)) over bonds",
+                "conformer_sensitivity_proxy_v1_formula": "weighted blend of normalized energy-span and geometry-span proxies from candidate_set_statistics_proxy_v1",
+                "electronic_compactness_proxy_v1_formula": "expected_electrons / realspace_features.density_isosurface_volume.value_angstrom3",
+                "lone_pair_driven_polarity_proxy_v1_formula": "mean(atomic_lone_pair_heuristic_proxy_i * abs(charge_ref_i))",
                 "limitations": [
                     "proxy summaries aggregate existing proxy vectors",
                     "not equivalent to exact qcMol external descriptors",
@@ -2070,7 +2090,9 @@ class FeatureExtractor:
 
         computed_any = False
         reasons: List[str] = []
+        metric_count = 0
 
+        charges_ref, charge_source = self._pick_charge_reference_vector(data=data, natm=natm_int)
         charges = atom_feat.get("atomic_charge_iao_proxy")
         if isinstance(charges, list) and len(charges) > 0:
             try:
@@ -2079,6 +2101,7 @@ class FeatureExtractor:
                 c_std = float(np.sqrt(np.mean([(x - c_mean) ** 2 for x in charge_vals])))
                 summary["atom_charge_dispersion_proxy"] = c_std
                 computed_any = True
+                metric_count += 1
 
                 hetero_idxs = [
                     i for i, sym in enumerate(atom_symbols)
@@ -2099,6 +2122,7 @@ class FeatureExtractor:
                             "atom_index_max": int(idx_max),
                         }
                         computed_any = True
+                        metric_count += 1
             except Exception:
                 reasons.append("atomic_charge_iao_proxy_non_numeric")
         else:
@@ -2116,6 +2140,7 @@ class FeatureExtractor:
                     "ratio": float(lp_count / len(lp_vals)),
                 }
                 computed_any = True
+                metric_count += 1
             except Exception:
                 reasons.append("atomic_lone_pair_heuristic_proxy_non_numeric")
         else:
@@ -2142,24 +2167,666 @@ class FeatureExtractor:
                     "ratio": float(high_count / len(di)),
                 }
                 computed_any = True
+                metric_count += 2
             except Exception:
                 reasons.append("bond_delocalization_index_proxy_v1_non_numeric")
         else:
             reasons.append("bond_delocalization_index_proxy_v1_missing")
 
-        summary["available"] = bool(computed_any)
-        if computed_any:
-            summary["metadata"]["status"] = "success"
-            summary["metadata"]["status_reason"] = "ok"
-            summary["metadata"]["input_warnings"] = reasons
+        # C1: polarity heterogeneity (charge dispersion weighted by hetero fraction).
+        if isinstance(charges_ref, list) and len(charges_ref) > 0:
+            c_mean_ref = float(sum(charges_ref) / len(charges_ref))
+            c_std_ref = float(np.sqrt(np.mean([(x - c_mean_ref) ** 2 for x in charges_ref])))
+            hetero_count = int(sum(1 for sym in atom_symbols if str(sym).upper() not in {"C", "H"}))
+            hetero_frac = float(hetero_count / max(1, len(atom_symbols)))
+            summary["polarity_heterogeneity_proxy_v1"] = float(c_std_ref * (1.0 + hetero_frac))
+            computed_any = True
+            metric_count += 1
         else:
+            reasons.append("polarity_heterogeneity_charge_ref_missing")
+
+        # C2: basin charge asymmetry (requires validated bader charge).
+        bader_charge = ((atom_feat.get("atomic_density_partition_charge_proxy") or {}).get("bader"))
+        bader_charge_vals = self._safe_numeric_list(bader_charge, expected_len=natm_int)
+        if isinstance(bader_charge_vals, list) and bader_charge_vals:
+            pos_sum = float(sum(x for x in bader_charge_vals if x > 0.0))
+            neg_sum = float(sum(x for x in bader_charge_vals if x < 0.0))
+            mean_abs = float(sum(abs(x) for x in bader_charge_vals) / len(bader_charge_vals))
+            summary["basin_charge_asymmetry_proxy_v1"] = {
+                "mean_abs_charge_e": mean_abs,
+                "positive_charge_sum_e": pos_sum,
+                "negative_charge_sum_e": neg_sum,
+                "charge_source": "atomic_density_partition_charge_proxy.bader",
+            }
+            computed_any = True
+            metric_count += 1
+        else:
+            reasons.append("basin_charge_asymmetry_bader_missing")
+
+        # C3: localized vs delocalized balance.
+        balance_vals = self._safe_numeric_list(
+            bond_feat.get("bond_delocalization_localization_balance_proxy_v1"),
+            expected_len=len(bond_feat.get("bond_indices") or []) if isinstance(bond_feat.get("bond_indices"), list) else None,
+        )
+        if isinstance(balance_vals, list) and balance_vals:
+            summary["localized_vs_delocalized_balance_proxy_v1"] = float(sum(balance_vals) / len(balance_vals))
+            computed_any = True
+            metric_count += 1
+        else:
+            di_vals2 = self._safe_numeric_list(bond_feat.get("bond_delocalization_index_proxy_v1"))
+            loc_vals2 = self._safe_numeric_list(bond_feat.get("bond_orbital_localization_proxy"))
+            if isinstance(di_vals2, list) and isinstance(loc_vals2, list) and len(di_vals2) == len(loc_vals2) and len(di_vals2) > 0:
+                raw = [
+                    float((loc_vals2[i] - di_vals2[i]) / (abs(loc_vals2[i]) + abs(di_vals2[i]) + 1e-8))
+                    for i in range(len(di_vals2))
+                ]
+                summary["localized_vs_delocalized_balance_proxy_v1"] = float(sum(raw) / len(raw))
+                computed_any = True
+                metric_count += 1
+            else:
+                reasons.append("localized_vs_delocalized_balance_inputs_missing")
+
+        # C4: conformer sensitivity proxy from candidate-set statistics.
+        conf_stats = (((data.get("structural_features") or {}).get("most_stable_conformation") or {}).get("candidate_set_statistics_proxy_v1")) or {}
+        if isinstance(conf_stats, dict):
+            e_span = conf_stats.get("conformer_energy_span_proxy")
+            size_var = conf_stats.get("geometry_size_variability_proxy") if isinstance(conf_stats.get("geometry_size_variability_proxy"), dict) else {}
+            compact = conf_stats.get("conformer_compactness_proxy_v1") if isinstance(conf_stats.get("conformer_compactness_proxy_v1"), dict) else {}
+            try:
+                e_term = float(e_span) / (1.0 + abs(float(e_span))) if e_span is not None else 0.0
+                size_span = float(size_var.get("span")) if size_var and size_var.get("span") is not None else 0.0
+                size_mean = float(size_var.get("mean")) if size_var and size_var.get("mean") not in (None, 0) else 0.0
+                compact_span = float(compact.get("span")) if compact and compact.get("span") is not None else 0.0
+                compact_mean = float(compact.get("mean")) if compact and compact.get("mean") not in (None, 0) else 0.0
+                size_ratio = size_span / (abs(size_mean) + 1e-8) if size_mean else 0.0
+                compact_ratio = compact_span / (abs(compact_mean) + 1e-8) if compact_mean else 0.0
+                sensitivity = 0.50 * e_term + 0.30 * (size_ratio / (1.0 + size_ratio)) + 0.20 * (compact_ratio / (1.0 + compact_ratio))
+                summary["conformer_sensitivity_proxy_v1"] = float(max(0.0, sensitivity))
+                computed_any = True
+                metric_count += 1
+            except Exception:
+                reasons.append("conformer_sensitivity_parse_failed")
+        else:
+            reasons.append("conformer_candidate_stats_missing")
+
+        # C5: electronic compactness proxy.
+        volume_info = (((data.get("realspace_features") or {}).get("density_isosurface_volume")) or {})
+        vol = volume_info.get("value_angstrom3") if isinstance(volume_info, dict) else None
+        atomic_numbers = atom_feat.get("atomic_number")
+        mol_charge = (data.get("molecule_info") or {}).get("charge")
+        if isinstance(vol, (int, float)) and float(vol) > 1e-8 and isinstance(atomic_numbers, list):
+            try:
+                expected_electrons = float(sum(float(z) for z in atomic_numbers) - float(mol_charge or 0.0))
+                summary["electronic_compactness_proxy_v1"] = float(expected_electrons / float(vol))
+                computed_any = True
+                metric_count += 1
+            except Exception:
+                reasons.append("electronic_compactness_parse_failed")
+        else:
+            reasons.append("electronic_compactness_inputs_missing")
+
+        # C6: lone-pair driven polarity proxy.
+        if isinstance(charges_ref, list) and isinstance(lp_scores, list) and len(charges_ref) == len(lp_scores) and len(lp_scores) > 0:
+            try:
+                lp_vals = [float(x) for x in lp_scores]
+                coupled = [float(lp_vals[i] * abs(charges_ref[i])) for i in range(len(lp_vals))]
+                summary["lone_pair_driven_polarity_proxy_v1"] = float(sum(coupled) / len(coupled))
+                computed_any = True
+                metric_count += 1
+            except Exception:
+                reasons.append("lone_pair_driven_polarity_parse_failed")
+        else:
+            reasons.append("lone_pair_driven_polarity_inputs_missing")
+
+        summary["available"] = bool(computed_any)
+        summary["metadata"]["charge_reference_source"] = charge_source
+        summary["metadata"]["implemented_metric_count"] = int(metric_count)
+        summary["metadata"]["total_metric_count"] = 11
+        summary["metadata"]["input_warnings"] = reasons
+        if metric_count == 0:
             summary["metadata"]["status"] = "unavailable"
             summary["metadata"]["status_reason"] = "|".join(reasons) if reasons else "proxy_inputs_missing"
+        elif metric_count >= 8:
+            summary["metadata"]["status"] = "success"
+            summary["metadata"]["status_reason"] = "ok"
+        else:
+            summary["metadata"]["status"] = "partial"
+            summary["metadata"]["status_reason"] = "partial_metrics_missing"
 
         data["global_features"]["proxy_family_summary_v1"] = summary
         logger.debug(
             f"[{molecule_id}] proxy_family_summary_v1 status={summary['metadata']['status']}, "
             f"reason={summary['metadata']['status_reason']}"
+        )
+
+    def _safe_numeric_list(
+        self,
+        values: Any,
+        expected_len: Optional[int] = None,
+        allow_none: bool = False,
+    ) -> Optional[List[float]]:
+        """Convert list-like values to float list with basic shape checks."""
+        if not isinstance(values, list):
+            return None
+        if isinstance(expected_len, int) and expected_len >= 0 and len(values) != expected_len:
+            return None
+        out: List[float] = []
+        for v in values:
+            if v is None:
+                if allow_none:
+                    out.append(float("nan"))
+                    continue
+                return None
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                return None
+        return out
+
+    def _summarize_numeric_vector(self, values: List[float]) -> Optional[Dict[str, Any]]:
+        """Build compact stats for a numeric vector."""
+        if not isinstance(values, list) or len(values) == 0:
+            return None
+        mean = float(sum(values) / len(values))
+        std = float(np.sqrt(np.mean([(x - mean) ** 2 for x in values])))
+        return {
+            "count": int(len(values)),
+            "min": float(min(values)),
+            "max": float(max(values)),
+            "mean": mean,
+            "std": std,
+            "span": float(max(values) - min(values)),
+            "abs_mean": float(sum(abs(x) for x in values) / len(values)),
+        }
+
+    def _pick_charge_reference_vector(
+        self,
+        data: Dict[str, Any],
+        natm: Optional[int],
+    ) -> Tuple[Optional[List[float]], Optional[str]]:
+        """Pick charge reference vector with deterministic source priority."""
+        atom_feat = (data.get("atom_features") or {})
+        charge_partition = atom_feat.get("atomic_density_partition_charge_proxy") or {}
+        charge_meta = (atom_feat.get("metadata") or {}).get("atomic_density_partition_charge_proxy") or {}
+
+        bader = self._safe_numeric_list(charge_partition.get("bader"), expected_len=natm)
+        bader_status = charge_meta.get("bader_status")
+        if isinstance(bader, list) and bader_status == "success":
+            return bader, "atomic_density_partition_charge_proxy.bader"
+
+        iao = self._safe_numeric_list(atom_feat.get("atomic_charge_iao_proxy"), expected_len=natm)
+        if isinstance(iao, list):
+            return iao, "atomic_charge_iao_proxy"
+
+        hirshfeld = self._safe_numeric_list(atom_feat.get("charge_hirshfeld"), expected_len=natm)
+        if isinstance(hirshfeld, list):
+            return hirshfeld, "charge_hirshfeld"
+        return None, None
+
+    def _compute_basin_family_summary_v1(
+        self,
+        builder: UnifiedOutputBuilder,
+        molecule_id: str,
+    ) -> None:
+        """
+        Deepening A: compact basin-family summary aligned to critic2/Bader route.
+        """
+        data = builder.data
+        atom_feat = (data.get("atom_features") or {})
+        atom_symbols = (data.get("geometry") or {}).get("atom_symbols") or []
+        natm = (data.get("molecule_info") or {}).get("natm")
+        natm_int = int(natm) if isinstance(natm, int) and natm >= 0 else None
+
+        qtaim = (((data.get("external_features") or {}).get("critic2") or {}).get("qtaim") or {})
+        stable_integrated = qtaim.get("stable_atomic_integrated_properties_v1") if isinstance(qtaim, dict) else {}
+        if not isinstance(stable_integrated, dict):
+            stable_integrated = {}
+
+        bader_pop = self._safe_numeric_list(stable_integrated.get("population_e"), expected_len=natm_int)
+        bader_lap = self._safe_numeric_list((atom_feat.get("atomic_density_partition_laplacian_proxy_v1") or {}).get("bader"), expected_len=natm_int)
+        bader_charge = self._safe_numeric_list((atom_feat.get("atomic_density_partition_charge_proxy") or {}).get("bader"), expected_len=natm_int)
+
+        summary = {
+            "available": False,
+            "definition_version": "v1",
+            "is_proxy": True,
+            "bader_population_dispersion_proxy": None,
+            "hetero_bader_charge_extrema_proxy": None,
+            "bader_laplacian_extrema_proxy": None,
+            "bader_laplacian_dispersion_proxy": None,
+            "atomwise_basin_companion_summary_proxy_v1": None,
+            "metadata": {
+                "candidate_set_scope": "single_optimized_geometry_current_run",
+                "status": "unavailable",
+                "status_reason": "basin_inputs_missing",
+                "bader_population_dispersion_proxy_formula": "std(external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e)",
+                "hetero_bader_charge_extrema_proxy_formula": "extrema over non C/H atoms in atom_features.atomic_density_partition_charge_proxy.bader",
+                "bader_laplacian_extrema_proxy_formula": "min/max/mean/std over atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "bader_laplacian_dispersion_proxy_formula": "std(atom_features.atomic_density_partition_laplacian_proxy_v1.bader)",
+                "atomwise_basin_companion_summary_proxy_v1_formula": "compact atomwise summary over validated bader charge / population / laplacian vectors",
+                "candidate_assessment_v1": {},
+                "limitations": [
+                    "requires critic2 qtaim integrated-property outputs",
+                    "basin quantities are open-source proxy companions, not exact qcMol NBO-family descriptors",
+                ],
+            },
+        }
+        assess: Dict[str, Dict[str, Any]] = {}
+        implemented = 0
+
+        if isinstance(bader_pop, list) and len(bader_pop) > 0:
+            pop_mean = float(sum(bader_pop) / len(bader_pop))
+            pop_std = float(np.sqrt(np.mean([(x - pop_mean) ** 2 for x in bader_pop])))
+            summary["bader_population_dispersion_proxy"] = pop_std
+            assess["bader_population_dispersion_proxy"] = {
+                "status": "implemented",
+                "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "numeric_vector_available",
+                "non_redundant_value": "captures basin-electron distribution heterogeneity beyond per-atom raw values",
+            }
+            implemented += 1
+        else:
+            assess["bader_population_dispersion_proxy"] = {
+                "status": "partial",
+                "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "population_vector_missing_or_invalid",
+            }
+
+        if isinstance(bader_charge, list) and len(bader_charge) > 0:
+            hetero_idx = [i for i, sym in enumerate(atom_symbols) if str(sym).upper() not in {"C", "H"} and i < len(bader_charge)]
+            if hetero_idx:
+                hetero_vals = [(i, bader_charge[i]) for i in hetero_idx]
+                idx_min, v_min = min(hetero_vals, key=lambda x: x[1])
+                idx_max, v_max = max(hetero_vals, key=lambda x: x[1])
+                vals = [v for _, v in hetero_vals]
+                summary["hetero_bader_charge_extrema_proxy"] = {
+                    "count": len(vals),
+                    "min": float(v_min),
+                    "max": float(v_max),
+                    "mean": float(sum(vals) / len(vals)),
+                    "atom_index_min": int(idx_min),
+                    "atom_index_max": int(idx_max),
+                }
+                assess["hetero_bader_charge_extrema_proxy"] = {
+                    "status": "implemented",
+                    "source": "atom_features.atomic_density_partition_charge_proxy.bader",
+                    "validation_rule": "bader_status_success_and_non_CH_subset_nonempty",
+                    "reason": "hetero_subset_available",
+                    "non_redundant_value": "focuses basin charge extrema on chemically active hetero subset",
+                }
+                implemented += 1
+            else:
+                assess["hetero_bader_charge_extrema_proxy"] = {
+                    "status": "rejected",
+                    "source": "atom_features.atomic_density_partition_charge_proxy.bader",
+                    "validation_rule": "requires at least one non-C/H atom",
+                    "reason": "no_hetero_atoms_in_current_molecule",
+                }
+        else:
+            assess["hetero_bader_charge_extrema_proxy"] = {
+                "status": "partial",
+                "source": "atom_features.atomic_density_partition_charge_proxy.bader",
+                "validation_rule": "bader_status_success_and_len_equals_natm",
+                "reason": "bader_charge_unavailable",
+            }
+
+        if isinstance(bader_lap, list) and len(bader_lap) > 0:
+            lap_stats = self._summarize_numeric_vector(bader_lap)
+            summary["bader_laplacian_extrema_proxy"] = lap_stats
+            summary["bader_laplacian_dispersion_proxy"] = None if lap_stats is None else lap_stats["std"]
+            assess["bader_laplacian_extrema_proxy"] = {
+                "status": "implemented",
+                "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "laplacian_vector_available",
+                "non_redundant_value": "captures basin curvature-field extremes not represented by charges alone",
+            }
+            assess["bader_laplacian_dispersion_proxy"] = {
+                "status": "implemented",
+                "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "laplacian_vector_available",
+                "non_redundant_value": "compact spread metric for basin Laplacian heterogeneity",
+            }
+            implemented += 2
+        else:
+            assess["bader_laplacian_extrema_proxy"] = {
+                "status": "partial",
+                "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "laplacian_vector_missing_or_invalid",
+            }
+            assess["bader_laplacian_dispersion_proxy"] = {
+                "status": "partial",
+                "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "laplacian_vector_missing_or_invalid",
+            }
+
+        companion = {
+            "natm": natm_int,
+            "charge_abs_mean_e": None,
+            "population_mean_e": None,
+            "laplacian_abs_mean": None,
+            "charge_source": "atom_features.atomic_density_partition_charge_proxy.bader",
+            "population_source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+            "laplacian_source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+        }
+        if isinstance(bader_charge, list) and len(bader_charge) > 0:
+            companion["charge_abs_mean_e"] = float(sum(abs(x) for x in bader_charge) / len(bader_charge))
+        if isinstance(bader_pop, list) and len(bader_pop) > 0:
+            companion["population_mean_e"] = float(sum(bader_pop) / len(bader_pop))
+        if isinstance(bader_lap, list) and len(bader_lap) > 0:
+            companion["laplacian_abs_mean"] = float(sum(abs(x) for x in bader_lap) / len(bader_lap))
+        if any(companion[k] is not None for k in ("charge_abs_mean_e", "population_mean_e", "laplacian_abs_mean")):
+            summary["atomwise_basin_companion_summary_proxy_v1"] = companion
+            assess["atomwise_basin_companion_summary_proxy_v1"] = {
+                "status": "implemented",
+                "source": "validated_bader_family_companions",
+                "validation_rule": "at_least_one_core_vector_available",
+                "reason": "at_least_one_companion_metric_available",
+                "non_redundant_value": "compact atomwise basin companion digest for downstream models",
+            }
+            implemented += 1
+        else:
+            assess["atomwise_basin_companion_summary_proxy_v1"] = {
+                "status": "partial",
+                "source": "validated_bader_family_companions",
+                "validation_rule": "at_least_one_core_vector_available",
+                "reason": "all_companion_vectors_missing",
+            }
+
+        summary["metadata"]["candidate_assessment_v1"] = assess
+        summary["metadata"]["implemented_candidate_count"] = int(implemented)
+        if implemented >= 4:
+            summary["available"] = True
+            summary["metadata"]["status"] = "success"
+            summary["metadata"]["status_reason"] = "ok"
+        elif implemented > 0:
+            summary["available"] = False
+            summary["metadata"]["status"] = "partial"
+            summary["metadata"]["status_reason"] = "partial_basin_companion_availability"
+        else:
+            summary["available"] = False
+            summary["metadata"]["status"] = "unavailable"
+            summary["metadata"]["status_reason"] = "basin_inputs_missing"
+
+        data["global_features"]["basin_proxy_summary_v1"] = summary
+        logger.debug(
+            f"[{molecule_id}] basin_proxy_summary_v1 status={summary['metadata']['status']}, "
+            f"implemented={implemented}"
+        )
+
+    def _compute_atom_bond_alignment_deepening_proxy_v1(
+        self,
+        builder: UnifiedOutputBuilder,
+        molecule_id: str,
+    ) -> None:
+        """
+        Deepening B: high-density atom/bond proxy layer with honest availability semantics.
+        """
+        data = builder.data
+        atom_feat = (data.get("atom_features") or {})
+        bond_feat = (data.get("bond_features") or {})
+        natm = (data.get("molecule_info") or {}).get("natm")
+        natm_int = int(natm) if isinstance(natm, int) and natm >= 0 else None
+        bond_indices = bond_feat.get("bond_indices")
+        n_bonds = len(bond_indices) if isinstance(bond_indices, list) else None
+
+        charges_ref, charge_source = self._pick_charge_reference_vector(data=data, natm=natm_int)
+        lap_vals = self._safe_numeric_list((atom_feat.get("atomic_density_partition_laplacian_proxy_v1") or {}).get("bader"), expected_len=natm_int)
+        lp_vals = self._safe_numeric_list(atom_feat.get("atomic_lone_pair_heuristic_proxy"), expected_len=natm_int)
+        di_vals = self._safe_numeric_list(bond_feat.get("bond_delocalization_index_proxy_v1"), expected_len=n_bonds)
+        mayer_vals = self._safe_numeric_list(bond_feat.get("bond_orders_mayer"), expected_len=n_bonds)
+        wiberg_vals = self._safe_numeric_list(bond_feat.get("bond_orders_wiberg"), expected_len=n_bonds)
+        elf_vals = self._safe_numeric_list(bond_feat.get("elf_bond_midpoint"), expected_len=n_bonds)
+        loc_vals = self._safe_numeric_list(bond_feat.get("bond_orbital_localization_proxy"), expected_len=n_bonds)
+        weighted_loc_vals = self._safe_numeric_list(bond_feat.get("bond_order_weighted_localization_proxy"), expected_len=n_bonds)
+
+        # -------- Atom-level deepening --------
+        coupling_vals: Optional[List[float]] = None
+        coupling_status = "unavailable"
+        coupling_reason = "atomic_charge_laplacian_inputs_missing"
+        if isinstance(charges_ref, list) and isinstance(lap_vals, list) and natm_int is not None:
+            coupling_vals = [float(charges_ref[i] * lap_vals[i]) for i in range(natm_int)]
+            coupling_status, coupling_reason = self._assess_proxy_list_availability(
+                values=coupling_vals,
+                expected_len=natm_int,
+                field_name="atomic_charge_laplacian_coupling_proxy_v1",
+            )
+            if coupling_status == "success":
+                builder.set_atom_features(atomic_charge_laplacian_coupling_proxy_v1=coupling_vals)
+        builder.set_atom_metadata(
+            "atomic_charge_laplacian_coupling_proxy_v1",
+            availability_status=coupling_status,
+            status_reason=coupling_reason,
+            skip_reason=None,
+            failure_reason=coupling_reason if coupling_status == "unavailable" else None,
+            charge_source=charge_source,
+        )
+
+        local_reactivity_vals: Optional[List[float]] = None
+        local_reactivity_status = "unavailable"
+        local_reactivity_reason = "atomic_local_reactivity_inputs_missing"
+        if isinstance(charges_ref, list) and isinstance(lap_vals, list) and natm_int is not None:
+            lp = lp_vals if isinstance(lp_vals, list) else [0.0] * natm_int
+            raw = [
+                float(np.sqrt(abs(charges_ref[i]) * (abs(lap_vals[i]) + 1e-8)) * (0.7 + 0.3 * float(lp[i])))
+                for i in range(natm_int)
+            ]
+            rmin = min(raw) if raw else 0.0
+            rmax = max(raw) if raw else 0.0
+            span = float(rmax - rmin)
+            if span <= 1e-12:
+                local_reactivity_vals = [0.0] * natm_int
+            else:
+                local_reactivity_vals = [float((x - rmin) / span) for x in raw]
+            local_reactivity_status, local_reactivity_reason = self._assess_proxy_list_availability(
+                values=local_reactivity_vals,
+                expected_len=natm_int,
+                field_name="atomic_local_reactivity_proxy_v1",
+            )
+            if local_reactivity_status == "success":
+                builder.set_atom_features(atomic_local_reactivity_proxy_v1=local_reactivity_vals)
+                if not isinstance(lp_vals, list):
+                    local_reactivity_reason = "ok_with_lone_pair_fallback_zero"
+        builder.set_atom_metadata(
+            "atomic_local_reactivity_proxy_v1",
+            availability_status=local_reactivity_status,
+            status_reason=local_reactivity_reason,
+            skip_reason=None,
+            failure_reason=local_reactivity_reason if local_reactivity_status == "unavailable" else None,
+            charge_source=charge_source,
+            lp_fallback_used=not isinstance(lp_vals, list),
+        )
+
+        lp_env_vals: Optional[List[float]] = None
+        lp_meta = ((atom_feat.get("metadata") or {}).get("atomic_lone_pair_heuristic_proxy") or {})
+        lp_upstream_status = self._normalize_availability_status(lp_meta.get("availability_status"))
+        lp_env_status = "unavailable"
+        lp_env_reason = "lone_pair_environment_inputs_missing"
+        if not isinstance(lp_vals, list) and lp_upstream_status in {"skipped", "not_attempted"}:
+            lp_env_status = lp_upstream_status
+            lp_env_reason = f"upstream_lone_pair_{lp_upstream_status}"
+        if isinstance(lp_vals, list) and isinstance(di_vals, list) and isinstance(bond_indices, list) and natm_int is not None:
+            neigh_sum = [0.0] * natm_int
+            neigh_cnt = [0] * natm_int
+            for idx, bond in enumerate(bond_indices):
+                if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+                    continue
+                i, j = int(bond[0]), int(bond[1])
+                if 0 <= i < natm_int and 0 <= j < natm_int and idx < len(di_vals):
+                    dij = float(di_vals[idx])
+                    neigh_sum[i] += dij
+                    neigh_sum[j] += dij
+                    neigh_cnt[i] += 1
+                    neigh_cnt[j] += 1
+            lp_env_vals = []
+            for i in range(natm_int):
+                mean_di = float(neigh_sum[i] / neigh_cnt[i]) if neigh_cnt[i] > 0 else 0.0
+                lp_env_vals.append(float(lp_vals[i] * mean_di))
+            lp_env_status, lp_env_reason = self._assess_proxy_list_availability(
+                values=lp_env_vals,
+                expected_len=natm_int,
+                field_name="lone_pair_environment_proxy_v1",
+            )
+            if lp_env_status == "success":
+                builder.set_atom_features(lone_pair_environment_proxy_v1=lp_env_vals)
+        builder.set_atom_metadata(
+            "lone_pair_environment_proxy_v1",
+            availability_status=lp_env_status,
+            status_reason=lp_env_reason,
+            skip_reason=None,
+            failure_reason=lp_env_reason if lp_env_status == "unavailable" else None,
+        )
+
+        # -------- Bond-level deepening --------
+        bond_covpol_vals: Optional[List[float]] = None
+        bond_covpol_status = "unavailable"
+        bond_covpol_reason = "bond_covalency_polarity_inputs_missing"
+        if (
+            isinstance(charges_ref, list)
+            and isinstance(mayer_vals, list)
+            and isinstance(wiberg_vals, list)
+            and isinstance(bond_indices, list)
+            and n_bonds is not None
+        ):
+            vals: List[float] = []
+            ok = True
+            for idx, bond in enumerate(bond_indices):
+                if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+                    ok = False
+                    break
+                i, j = int(bond[0]), int(bond[1])
+                if not (0 <= i < len(charges_ref) and 0 <= j < len(charges_ref)):
+                    ok = False
+                    break
+                cov = max(0.0, 0.5 * (max(0.0, mayer_vals[idx]) + max(0.0, wiberg_vals[idx])))
+                polarity = abs(charges_ref[i] - charges_ref[j])
+                vals.append(float(polarity / (1.0 + cov)))
+            if ok:
+                bond_covpol_vals = vals
+                bond_covpol_status, bond_covpol_reason = self._assess_proxy_list_availability(
+                    values=bond_covpol_vals,
+                    expected_len=n_bonds,
+                    field_name="bond_covalency_polarity_proxy_v1",
+                )
+                if bond_covpol_status == "success":
+                    builder.set_bond_features(bond_covalency_polarity_proxy_v1=bond_covpol_vals)
+        builder.set_bond_metadata(
+            "bond_covalency_polarity_proxy_v1",
+            availability_status=bond_covpol_status,
+            status_reason=bond_covpol_reason,
+            skip_reason=None,
+            failure_reason=bond_covpol_reason if bond_covpol_status == "unavailable" else None,
+            charge_source=charge_source,
+        )
+
+        # Prefer direct orbital localization; fallback derive from weighted localization and DI.
+        loc_source = "bond_orbital_localization_proxy"
+        if not isinstance(loc_vals, list) and isinstance(weighted_loc_vals, list) and isinstance(di_vals, list):
+            if len(weighted_loc_vals) == len(di_vals) and len(di_vals) > 0:
+                loc_vals = [
+                    float(weighted_loc_vals[i] / di_vals[i]) if abs(di_vals[i]) > 1e-8 else 0.0
+                    for i in range(len(di_vals))
+                ]
+                loc_source = "bond_order_weighted_localization_proxy/bond_delocalization_index_proxy_v1"
+
+        bond_balance_vals: Optional[List[float]] = None
+        loc_meta = ((bond_feat.get("metadata") or {}).get("bond_orbital_localization_proxy") or {})
+        loc_upstream_status = self._normalize_availability_status(loc_meta.get("availability_status"))
+        bond_balance_status = "unavailable"
+        bond_balance_reason = "bond_delocalization_localization_balance_inputs_missing"
+        if not isinstance(loc_vals, list) and loc_upstream_status in {"skipped", "not_attempted"}:
+            bond_balance_status = loc_upstream_status
+            bond_balance_reason = f"upstream_bond_orbital_localization_{loc_upstream_status}"
+        if isinstance(di_vals, list) and isinstance(loc_vals, list) and n_bonds is not None and len(di_vals) == len(loc_vals):
+            bond_balance_vals = [
+                float((loc_vals[i] - di_vals[i]) / (abs(loc_vals[i]) + abs(di_vals[i]) + 1e-8))
+                for i in range(len(di_vals))
+            ]
+            bond_balance_status, bond_balance_reason = self._assess_proxy_list_availability(
+                values=bond_balance_vals,
+                expected_len=n_bonds,
+                field_name="bond_delocalization_localization_balance_proxy_v1",
+            )
+            if bond_balance_status == "success":
+                builder.set_bond_features(bond_delocalization_localization_balance_proxy_v1=bond_balance_vals)
+                if loc_source != "bond_orbital_localization_proxy":
+                    bond_balance_reason = "ok_with_localization_fallback"
+        builder.set_bond_metadata(
+            "bond_delocalization_localization_balance_proxy_v1",
+            availability_status=bond_balance_status,
+            status_reason=bond_balance_reason,
+            skip_reason=None,
+            failure_reason=bond_balance_reason if bond_balance_status == "unavailable" else None,
+            localization_source=loc_source if bond_balance_status == "success" else None,
+        )
+
+        bond_elf_deloc_vals: Optional[List[float]] = None
+        bond_elf_deloc_status = "unavailable"
+        bond_elf_deloc_reason = "bond_elf_deloc_coupling_inputs_missing"
+        if isinstance(elf_vals, list) and isinstance(di_vals, list) and n_bonds is not None and len(elf_vals) == len(di_vals):
+            bond_elf_deloc_vals = [
+                float(max(0.0, min(1.0, elf_vals[i])) * max(0.0, di_vals[i]))
+                for i in range(len(di_vals))
+            ]
+            bond_elf_deloc_status, bond_elf_deloc_reason = self._assess_proxy_list_availability(
+                values=bond_elf_deloc_vals,
+                expected_len=n_bonds,
+                field_name="bond_elf_deloc_coupling_proxy_v1",
+            )
+            if bond_elf_deloc_status == "success":
+                builder.set_bond_features(bond_elf_deloc_coupling_proxy_v1=bond_elf_deloc_vals)
+        builder.set_bond_metadata(
+            "bond_elf_deloc_coupling_proxy_v1",
+            availability_status=bond_elf_deloc_status,
+            status_reason=bond_elf_deloc_reason,
+            skip_reason=None,
+            failure_reason=bond_elf_deloc_reason if bond_elf_deloc_status == "unavailable" else None,
+        )
+
+        bond_strength_vals: Optional[List[float]] = None
+        bond_strength_status = "unavailable"
+        bond_strength_reason = "bond_strength_pattern_inputs_missing"
+        if (
+            isinstance(mayer_vals, list)
+            and isinstance(wiberg_vals, list)
+            and isinstance(elf_vals, list)
+            and isinstance(di_vals, list)
+            and n_bonds is not None
+            and len(mayer_vals) == len(wiberg_vals) == len(elf_vals) == len(di_vals)
+        ):
+            bond_strength_vals = [
+                float(
+                    0.40 * max(0.0, mayer_vals[i])
+                    + 0.30 * max(0.0, wiberg_vals[i])
+                    + 0.20 * max(0.0, min(1.0, elf_vals[i]))
+                    + 0.10 * max(0.0, di_vals[i])
+                )
+                for i in range(len(di_vals))
+            ]
+            bond_strength_status, bond_strength_reason = self._assess_proxy_list_availability(
+                values=bond_strength_vals,
+                expected_len=n_bonds,
+                field_name="bond_strength_pattern_proxy_v1",
+            )
+            if bond_strength_status == "success":
+                builder.set_bond_features(bond_strength_pattern_proxy_v1=bond_strength_vals)
+        builder.set_bond_metadata(
+            "bond_strength_pattern_proxy_v1",
+            availability_status=bond_strength_status,
+            status_reason=bond_strength_reason,
+            skip_reason=None,
+            failure_reason=bond_strength_reason if bond_strength_status == "unavailable" else None,
+        )
+
+        logger.debug(
+            f"[{molecule_id}] deepening atom/bond proxies: "
+            f"atom(coupling={coupling_status},reactivity={local_reactivity_status},lp_env={lp_env_status}), "
+            f"bond(covpol={bond_covpol_status},balance={bond_balance_status},elf_deloc={bond_elf_deloc_status},strength={bond_strength_status})"
         )
 
     def _normalize_availability_status(self, raw_status: Any) -> str:
@@ -2237,6 +2904,13 @@ class FeatureExtractor:
             failure_reason=failure_reason,
             upstream_orbital_extraction_status=upstream_status,
         )
+        builder.set_atom_metadata(
+            "lone_pair_environment_proxy_v1",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
+        )
         builder.set_bond_metadata(
             "bond_orbital_localization_proxy",
             availability_status=status,
@@ -2252,6 +2926,13 @@ class FeatureExtractor:
             skip_reason=skip_reason,
             failure_reason=failure_reason,
             upstream_orbital_extraction_status=upstream_status,
+        )
+        builder.set_bond_metadata(
+            "bond_delocalization_localization_balance_proxy_v1",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
         )
 
     def _pick_external_integrated_property_values(
@@ -3633,6 +4314,9 @@ class FeatureExtractor:
             ("charge_cm5", atom_feat.get("charge_cm5")),
             ("charge_iao", atom_feat.get("charge_iao")),
             ("atomic_charge_iao_proxy", atom_feat.get("atomic_charge_iao_proxy")),
+            ("atomic_charge_laplacian_coupling_proxy_v1", atom_feat.get("atomic_charge_laplacian_coupling_proxy_v1")),
+            ("atomic_local_reactivity_proxy_v1", atom_feat.get("atomic_local_reactivity_proxy_v1")),
+            ("lone_pair_environment_proxy_v1", atom_feat.get("lone_pair_environment_proxy_v1")),
             ("atomic_lone_pair_heuristic_proxy", atom_feat.get("atomic_lone_pair_heuristic_proxy")),
             ("elf_value", atom_feat.get("elf_value")),
         ]
@@ -3715,6 +4399,10 @@ class FeatureExtractor:
             ("bond_delocalization_index_proxy_v1", bond_feat.get("bond_delocalization_index_proxy_v1")),
             ("bond_orbital_localization_proxy", bond_feat.get("bond_orbital_localization_proxy")),
             ("bond_order_weighted_localization_proxy", bond_feat.get("bond_order_weighted_localization_proxy")),
+            ("bond_covalency_polarity_proxy_v1", bond_feat.get("bond_covalency_polarity_proxy_v1")),
+            ("bond_delocalization_localization_balance_proxy_v1", bond_feat.get("bond_delocalization_localization_balance_proxy_v1")),
+            ("bond_elf_deloc_coupling_proxy_v1", bond_feat.get("bond_elf_deloc_coupling_proxy_v1")),
+            ("bond_strength_pattern_proxy_v1", bond_feat.get("bond_strength_pattern_proxy_v1")),
         ]
         
         for name, arr in bond_arrays:

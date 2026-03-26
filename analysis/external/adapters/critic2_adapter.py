@@ -452,6 +452,7 @@ class Critic2Adapter(ExternalAdapter):
         - stable_atomic_integrated_properties_v1
         - stable_atomic_integrated_property_summary_v1
         - atomic_integrated_property_candidate_assessment_v1
+        - basin_companion_summary_v1
         """
         integrated = qtaim.get("atomic_integrated_properties")
         if not isinstance(integrated, dict):
@@ -539,9 +540,35 @@ class Critic2Adapter(ExternalAdapter):
             "expected_reliability": "low",
         }
 
+        n_implemented = sum(1 for x in candidate_assessment.values() if isinstance(x, dict) and x.get("status") == "implemented")
+        basin_status = "success" if n_implemented >= 2 else "partial"
+        basin_reason = "ok" if basin_status == "success" else "insufficient_stable_integrated_columns"
+        if n_implemented <= 0:
+            basin_status = "unavailable"
+            basin_reason = "stable_integrated_columns_missing"
+
+        basin_companion_summary = {
+            "available": basin_status == "success",
+            "definition_version": "v1",
+            "population_e_stats": summary_values["population_e"],
+            "laplacian_integral_stats": summary_values["laplacian_integral"],
+            "volume_stats": summary_values["volume"],
+            "metadata": {
+                "status": basin_status,
+                "status_reason": basin_reason,
+                "implemented_candidate_count": int(n_implemented),
+                "candidate_count": int(len(candidate_assessment)),
+                "limitations": [
+                    "summary depends on critic2 integrated atomic-property table availability",
+                    "volume is often partial due missing/non-numeric volume column in current critic2 outputs",
+                ],
+            },
+        }
+
         qtaim["stable_atomic_integrated_properties_v1"] = stable_values
         qtaim["stable_atomic_integrated_property_summary_v1"] = summary_values
         qtaim["atomic_integrated_property_candidate_assessment_v1"] = candidate_assessment
+        qtaim["basin_companion_summary_v1"] = basin_companion_summary
 
     @staticmethod
     def _normalize_column_name(token: str) -> str:

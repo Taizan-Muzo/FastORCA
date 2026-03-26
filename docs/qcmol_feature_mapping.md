@@ -241,6 +241,36 @@ Frozen formulas/constraints:
   - `global_features.proxy_family_summary_v1`
   - stability-first summaries over IAO charge / LP heuristic / bond DI vectors
 
+## qcMol Feature Alignment Deepening (v2)
+
+- Critic2 / basin family deepening:
+  - `global_features.basin_proxy_summary_v1`
+    - `bader_population_dispersion_proxy`
+    - `hetero_bader_charge_extrema_proxy`
+    - `bader_laplacian_extrema_proxy`
+    - `bader_laplacian_dispersion_proxy`
+    - `atomwise_basin_companion_summary_proxy_v1`
+  - `external_features.critic2.qtaim.basin_companion_summary_v1`
+    - compact integrated-property summary with status and implemented-candidate counts
+- Atom/Bond localized proxy deepening:
+  - atom-level:
+    - `atom_features.atomic_charge_laplacian_coupling_proxy_v1`
+    - `atom_features.atomic_local_reactivity_proxy_v1`
+    - `atom_features.lone_pair_environment_proxy_v1`
+  - bond-level:
+    - `bond_features.bond_covalency_polarity_proxy_v1`
+    - `bond_features.bond_delocalization_localization_balance_proxy_v1`
+    - `bond_features.bond_elf_deloc_coupling_proxy_v1`
+    - `bond_features.bond_strength_pattern_proxy_v1`
+- Molecule-level scarce-summary deepening in:
+  - `global_features.proxy_family_summary_v1`
+    - `polarity_heterogeneity_proxy_v1`
+    - `basin_charge_asymmetry_proxy_v1`
+    - `localized_vs_delocalized_balance_proxy_v1`
+    - `conformer_sensitivity_proxy_v1`
+    - `electronic_compactness_proxy_v1`
+    - `lone_pair_driven_polarity_proxy_v1`
+
 ## bond_indices Semantics
 
 - `bond_indices` is a bond list aligned to all bond-level arrays in the same order.

@@ -186,6 +186,31 @@ class UnifiedOutputBuilder:
                     "bounding_box_diagonal_angstrom": None,
                     "heavy_atom_count_proxy": None
                 },
+                "basin_proxy_summary_v1": {
+                    "available": False,
+                    "definition_version": "v1",
+                    "is_proxy": True,
+                    "bader_population_dispersion_proxy": None,
+                    "hetero_bader_charge_extrema_proxy": None,
+                    "bader_laplacian_extrema_proxy": None,
+                    "bader_laplacian_dispersion_proxy": None,
+                    "atomwise_basin_companion_summary_proxy_v1": None,
+                    "metadata": {
+                        "candidate_set_scope": "single_optimized_geometry_current_run",
+                        "status": "not_attempted",
+                        "status_reason": "not_computed_yet",
+                        "bader_population_dispersion_proxy_formula": "std(external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e)",
+                        "hetero_bader_charge_extrema_proxy_formula": "extrema over non C/H atoms in atom_features.atomic_density_partition_charge_proxy.bader",
+                        "bader_laplacian_extrema_proxy_formula": "min/max/mean/std over atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                        "bader_laplacian_dispersion_proxy_formula": "std(atom_features.atomic_density_partition_laplacian_proxy_v1.bader)",
+                        "atomwise_basin_companion_summary_proxy_v1_formula": "compact atomwise summary over validated bader charge / population / laplacian vectors",
+                        "candidate_assessment_v1": {},
+                        "limitations": [
+                            "requires critic2 qtaim integrated-property outputs",
+                            "basin quantities are open-source proxy companions, not exact qcMol NBO-family descriptors"
+                        ],
+                    },
+                },
                 "proxy_family_summary_v1": {
                     "available": False,
                     "definition_version": "v1",
@@ -195,6 +220,12 @@ class UnifiedOutputBuilder:
                     "lone_pair_rich_atom_count_proxy": None,
                     "bond_delocalization_extrema_proxy": None,
                     "high_delocalization_bond_count_proxy": None,
+                    "polarity_heterogeneity_proxy_v1": None,
+                    "basin_charge_asymmetry_proxy_v1": None,
+                    "localized_vs_delocalized_balance_proxy_v1": None,
+                    "conformer_sensitivity_proxy_v1": None,
+                    "electronic_compactness_proxy_v1": None,
+                    "lone_pair_driven_polarity_proxy_v1": None,
                     "metadata": {
                         "candidate_set_scope": "single_optimized_geometry_current_run",
                         "status": "not_attempted",
@@ -204,6 +235,12 @@ class UnifiedOutputBuilder:
                         "lone_pair_rich_atom_count_proxy_formula": "count(score >= 0.6) over atomic_lone_pair_heuristic_proxy",
                         "bond_delocalization_extrema_proxy_formula": "min/max/mean/std over bond_delocalization_index_proxy_v1",
                         "high_delocalization_bond_count_proxy_formula": "count(di >= 1.0) over bond_delocalization_index_proxy_v1",
+                        "polarity_heterogeneity_proxy_v1_formula": "std(charge_ref) * (1 + hetero_atom_fraction), charge_ref prefers validated bader then IAO",
+                        "basin_charge_asymmetry_proxy_v1_formula": "mean(abs(bader_charge_i)) with signed charge-sum companions when bader charge is validated",
+                        "localized_vs_delocalized_balance_proxy_v1_formula": "mean((loc_i - di_i)/(abs(loc_i)+abs(di_i)+1e-8)) over bonds",
+                        "conformer_sensitivity_proxy_v1_formula": "weighted blend of normalized energy-span and geometry-span proxies from candidate_set_statistics_proxy_v1",
+                        "electronic_compactness_proxy_v1_formula": "expected_electrons / realspace_features.density_isosurface_volume.value_angstrom3",
+                        "lone_pair_driven_polarity_proxy_v1_formula": "mean(atomic_lone_pair_heuristic_proxy_i * abs(charge_ref_i))",
                         "limitations": [
                             "proxy summaries aggregate existing proxy vectors",
                             "not equivalent to exact qcMol external descriptors"
@@ -331,6 +368,9 @@ class UnifiedOutputBuilder:
                 "atomic_density_partition_laplacian_proxy_v1": {
                     "bader": None,
                 },
+                "atomic_charge_laplacian_coupling_proxy_v1": None,
+                "atomic_local_reactivity_proxy_v1": None,
+                "lone_pair_environment_proxy_v1": None,
                 "atomic_lone_pair_heuristic_proxy": None,
                 "atomic_orbital_descriptor_proxy_v1": {
                     "n_dominant_ibo": None,
@@ -404,6 +444,71 @@ class UnifiedOutputBuilder:
                             "units/physical meaning follow critic2 integrated table conventions"
                         ],
                     },
+                    "atomic_charge_laplacian_coupling_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "charge_source_priority": [
+                            "atomic_density_partition_charge_proxy.bader",
+                            "atomic_charge_iao_proxy",
+                            "charge_hirshfeld"
+                        ],
+                        "charge_source": None,
+                        "laplacian_source": "atomic_density_partition_laplacian_proxy_v1.bader",
+                        "formula": "coupling_i = charge_ref_i * laplacian_bader_i",
+                        "units": "e * critic2_integrated_laplacian_like_units",
+                        "limitations": [
+                            "requires Lap-like integrated quantity from critic2",
+                            "charge_ref source may fallback from bader to IAO/Hirshfeld when bader is unavailable"
+                        ],
+                    },
+                    "atomic_local_reactivity_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "minmax_over_atoms(sqrt(abs(charge_ref_i) * (abs(laplacian_i)+1e-8)) * (0.7 + 0.3*lp_i))",
+                        "charge_source_priority": [
+                            "atomic_density_partition_charge_proxy.bader",
+                            "atomic_charge_iao_proxy",
+                            "charge_hirshfeld"
+                        ],
+                        "charge_source": None,
+                        "lp_source": "atomic_lone_pair_heuristic_proxy (missing -> 0)",
+                        "lp_fallback_used": False,
+                        "range": "[0, 1]",
+                        "limitations": [
+                            "heuristic local reactivity proxy, not a direct conceptual-DFT local descriptor",
+                            "depends on critic2 Lap-like integral and chosen charge proxy"
+                        ],
+                    },
+                    "lone_pair_environment_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "lp_i * mean_j(bond_delocalization_index_proxy_v1(i,j)) over incident bonds",
+                        "inputs_used": [
+                            "atomic_lone_pair_heuristic_proxy",
+                            "bond_features.bond_indices",
+                            "bond_features.bond_delocalization_index_proxy_v1"
+                        ],
+                        "range": "[0, +inf)",
+                        "limitations": [
+                            "depends on orbital-derived lone pair proxy availability",
+                            "zero for atoms without incident bonds in current topology"
+                        ],
+                    },
                     "atomic_lone_pair_heuristic_proxy": {
                         "is_proxy": True,
                         "is_heuristic": True,
@@ -467,6 +572,10 @@ class UnifiedOutputBuilder:
                 "bond_delocalization_index_proxy_v1": None,
                 "bond_orbital_localization_proxy": None,
                 "bond_order_weighted_localization_proxy": None,
+                "bond_covalency_polarity_proxy_v1": None,
+                "bond_delocalization_localization_balance_proxy_v1": None,
+                "bond_elf_deloc_coupling_proxy_v1": None,
+                "bond_strength_pattern_proxy_v1": None,
                 "metadata": {
                     "bond_stereo_info": {
                         "available": False,
@@ -516,6 +625,81 @@ class UnifiedOutputBuilder:
                         "is_heuristic": True,
                         "limitations": [
                             "composite proxy from localization and DI proxies"
+                        ],
+                    },
+                    "bond_covalency_polarity_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "abs(charge_ref_i - charge_ref_j) / (1 + max(0, 0.5*(max(0,mayer_ij)+max(0,wiberg_ij))))",
+                        "charge_source_priority": [
+                            "atomic_density_partition_charge_proxy.bader",
+                            "atomic_charge_iao_proxy",
+                            "charge_hirshfeld"
+                        ],
+                        "charge_source": None,
+                        "limitations": [
+                            "heuristic polarity-vs-covalency proxy",
+                            "depends on chosen atomic charge proxy"
+                        ],
+                    },
+                    "bond_delocalization_localization_balance_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "(loc_ij - di_ij) / (abs(loc_ij) + abs(di_ij) + 1e-8)",
+                        "inputs_used": [
+                            "bond_orbital_localization_proxy",
+                            "bond_delocalization_index_proxy_v1"
+                        ],
+                        "localization_source": None,
+                        "range": "[-1, 1]",
+                        "limitations": [
+                            "depends on orbital-derived localization proxy when available"
+                        ],
+                    },
+                    "bond_elf_deloc_coupling_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "clamp(elf_bond_midpoint,0,1) * max(0,bond_delocalization_index_proxy_v1)",
+                        "inputs_used": [
+                            "elf_bond_midpoint",
+                            "bond_delocalization_index_proxy_v1"
+                        ],
+                        "limitations": [
+                            "captures coupled localization+delocalization tendency in a single scalar"
+                        ],
+                    },
+                    "bond_strength_pattern_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "0.40*max(0,mayer) + 0.30*max(0,wiberg) + 0.20*clamp(elf,0,1) + 0.10*max(0,di)",
+                        "inputs_used": [
+                            "bond_orders_mayer",
+                            "bond_orders_wiberg",
+                            "elf_bond_midpoint",
+                            "bond_delocalization_index_proxy_v1"
+                        ],
+                        "limitations": [
+                            "heuristic composite proxy, not an exact quantum bond strength observable"
                         ],
                     },
                 }
@@ -743,6 +927,7 @@ class UnifiedOutputBuilder:
                             "stable_atomic_integrated_properties_v1": None,
                             "stable_atomic_integrated_property_summary_v1": None,
                             "atomic_integrated_property_candidate_assessment_v1": None,
+                            "basin_companion_summary_v1": None,
                             "metadata": {
                                 "analysis_type": None,
                                 "convergence_status": None,
