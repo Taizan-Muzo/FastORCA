@@ -159,6 +159,44 @@ Frozen formulas/constraints:
     - `bader_volume_column_not_reported_in_critic2_output`
     - `bader_volume_column_present_but_all_null`
 
+### Orbital/Proxy availability semantics (v1)
+
+- Unified availability enum for orbital-dependent outputs:
+  - `success | skipped | unavailable | not_attempted`
+- Upstream status:
+  - `orbital_features.metadata.extraction_status` now follows the same enum.
+  - `skip_reason` is used only when status is `skipped`.
+  - `failure_reason` is used only when status is `unavailable`.
+- Downstream proxy metadata nodes now carry explicit availability:
+  - `atom_features.metadata.atomic_lone_pair_heuristic_proxy`
+  - `atom_features.metadata.atomic_orbital_descriptor_proxy_v1`
+  - `bond_features.metadata.bond_orbital_localization_proxy`
+  - `bond_features.metadata.bond_order_weighted_localization_proxy`
+- Required metadata keys (for each node above):
+  - `availability_status`
+  - `status_reason`
+  - `skip_reason`
+  - `failure_reason`
+  - `upstream_orbital_extraction_status`
+- Null semantics:
+  - `not_attempted/skipped/unavailable` may all keep canonical value field as `null`, but are distinguished by metadata status/reason.
+  - `success` allows true low/zero values without being confused with uncomputed/null.
+
+### Critic2 exploitable outputs (current)
+
+- Besides canonical Bader writeback fields, we now keep parsed atomic integrated columns in:
+  - `external_features.critic2.qtaim.atomic_integrated_properties`
+- Typical stable keys (when present in critic2 table):
+  - `Pop` (electron population)
+  - `Lap` (integrated Laplacian-like property from critic2 table)
+  - `Volume` (if critic2 actually reports a volume column)
+- Parser metadata exposed at:
+  - `external_features.critic2.qtaim.metadata.atomic_property_*`
+  - includes header tokens, parser note, parsed row count, and parsed column order.
+- Reliability policy:
+  - raw parsed integrated properties can be preserved in `external_features`.
+  - canonical main fields (`atom_features.atomic_density_partition_*_proxy.bader`) still require dedicated validation gates.
+
 ## bond_indices Semantics
 
 - `bond_indices` is a bond list aligned to all bond-level arrays in the same order.

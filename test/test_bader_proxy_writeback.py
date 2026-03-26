@@ -166,10 +166,13 @@ def test_integrated_atomic_property_parser_prefers_pop_column():
 * Integrated molecular properties
 """.strip("\n")
 
-    charges, populations, volumes, parse_meta = adapter._parse_integrated_atomic_properties(content)
+    charges, populations, volumes, parse_meta, integrated = adapter._parse_integrated_atomic_properties(content)
 
     assert populations == [5.9, 8.2, 0.9]
     assert [round(x, 6) for x in charges] == [0.1, -0.2, 0.1]
     assert volumes is None
+    assert integrated is not None
+    assert integrated["Pop"] == [5.9, 8.2, 0.9]
+    assert integrated["Lap"] == [-0.111, -0.222, -0.333]
     assert parse_meta["atomic_property_pop_column"] == "Pop"
     assert parse_meta["atomic_property_volume_available"] is False

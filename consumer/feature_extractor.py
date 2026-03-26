@@ -54,6 +54,7 @@ class FeatureExtractor:
     # pass if |sum(N_i) - expected_electrons| <= max(abs_tol, rel_tol * expected_electrons)
     BADER_POPULATION_SUM_ABS_TOL_E = 0.50
     BADER_POPULATION_SUM_REL_TOL = 0.02
+    AVAILABILITY_STATUS_ENUM = {"success", "skipped", "unavailable", "not_attempted"}
     
     def __init__(
         self,
@@ -1537,12 +1538,22 @@ class FeatureExtractor:
             plan = plugin_plan["orbital_features"]
             should_run_orbital = plan.get("should_execute", True)
             orbital_skip_reason = plan.get("skip_reason")
-        
+
+        # Initialize dependent proxy availability to explicit not_attempted semantics.
+        self._set_orbital_proxy_availability(
+            builder=builder,
+            availability_status="not_attempted",
+            status_reason="not_attempted_by_default",
+            upstream_orbital_extraction_status="not_attempted",
+            skip_reason=None,
+            failure_reason=None,
+        )
+
         if should_run_orbital and mol is not None and mf is not None:
             try:
                 logger.info(f"[{molecule_id}] Extracting orbital features (IBO)...")
                 orbital_features = extract_orbital_features(mol, mf)
-                
+
                 # 将结果填入 builder
                 builder.set_orbital_features(
                     local_orbital_method=orbital_features.get("local_orbital_method"),
@@ -1554,35 +1565,94 @@ class FeatureExtractor:
                     orbital_locality_score=orbital_features.get("orbital_locality_score"),
                     iao_atom_mapping=orbital_features.get("iao_atom_mapping"),
                 )
-                
-                # 设置 metadata
-                metadata = orbital_features.get("metadata", {})
+
+                # 统一 extraction_status 语义:
+                # success / skipped / unavailable / not_attempted
+                metadata = dict(orbital_features.get("metadata", {}) or {})
+                raw_status = metadata.get("extraction_status")
+                orbital_status = self._normalize_availability_status(raw_status)
+                raw_failure_reason = metadata.get("failure_reason")
+                raw_skip_reason = metadata.get("skip_reason")
+                normalized_skip_reason = raw_skip_reason if raw_skip_reason else (
+                    raw_failure_reason if orbital_status == "skipped" else None
+                )
+                normalized_failure_reason = raw_failure_reason if orbital_status == "unavailable" else None
+                metadata["extraction_status"] = orbital_status
+                metadata["skip_reason"] = normalized_skip_reason
+                metadata["failure_reason"] = normalized_failure_reason
                 builder.set_orbital_metadata(**metadata)
-                
-                status = metadata.get("extraction_status", "unknown")
-                if status == "success":
+
+                if orbital_status == "success":
                     logger.success(f"[{molecule_id}] Orbital features extracted: {orbital_features.get('ibo_count')} IBOs")
+                    n_bonds_expected = len(bond_indices) if isinstance(bond_indices, list) else None
+                    natm_expected = mol.natm
+
                     # B1 proxy: bond orbital localization proxy with frozen candidate rules
                     bond_orbital_localization_proxy = self._compute_bond_orbital_localization_proxy(
                         bond_indices=bond_indices,
                         orbital_features=orbital_features,
                     )
+                    bol_status, bol_reason = self._assess_proxy_list_availability(
+                        values=bond_orbital_localization_proxy,
+                        expected_len=n_bonds_expected,
+                        field_name="bond_orbital_localization_proxy",
+                    )
+                    if bol_status == "success":
+                        builder.set_bond_features(
+                            bond_orbital_localization_proxy=bond_orbital_localization_proxy,
+                        )
+                    builder.set_bond_metadata(
+                        "bond_orbital_localization_proxy",
+                        availability_status=bol_status,
+                        status_reason=bol_reason,
+                        skip_reason=None,
+                        failure_reason=bol_reason if bol_status == "unavailable" else None,
+                        upstream_orbital_extraction_status="success",
+                    )
+
                     bond_order_weighted_localization_proxy = self._compute_bond_order_weighted_localization_proxy(
                         bond_orbital_localization_proxy=bond_orbital_localization_proxy,
                         bond_delocalization_index_proxy_v1=bond_di_proxy_v1,
                     )
-                    builder.set_bond_features(
-                        bond_orbital_localization_proxy=bond_orbital_localization_proxy,
-                        bond_order_weighted_localization_proxy=bond_order_weighted_localization_proxy,
+                    bowl_status, bowl_reason = self._assess_proxy_list_availability(
+                        values=bond_order_weighted_localization_proxy,
+                        expected_len=n_bonds_expected,
+                        field_name="bond_order_weighted_localization_proxy",
+                    )
+                    if bowl_status == "success":
+                        builder.set_bond_features(
+                            bond_order_weighted_localization_proxy=bond_order_weighted_localization_proxy,
+                        )
+                    builder.set_bond_metadata(
+                        "bond_order_weighted_localization_proxy",
+                        availability_status=bowl_status,
+                        status_reason=bowl_reason,
+                        skip_reason=None,
+                        failure_reason=bowl_reason if bowl_status == "unavailable" else None,
+                        upstream_orbital_extraction_status="success",
                     )
 
                     # B1 proxy: atom-level fixed-shape descriptor (4 dimensions per atom)
                     descriptor_v1 = self._compute_atomic_orbital_descriptor_proxy_v1(
                         orbital_features=orbital_features,
-                        natm=mol.natm,
+                        natm=natm_expected,
                     )
-                    builder.set_atom_features(
-                        atomic_orbital_descriptor_proxy_v1=descriptor_v1,
+                    descriptor_status, descriptor_reason = self._assess_atomic_descriptor_proxy_availability(
+                        descriptor=descriptor_v1,
+                        natm=natm_expected,
+                        field_name="atomic_orbital_descriptor_proxy_v1",
+                    )
+                    if descriptor_status == "success":
+                        builder.set_atom_features(
+                            atomic_orbital_descriptor_proxy_v1=descriptor_v1,
+                        )
+                    builder.set_atom_metadata(
+                        "atomic_orbital_descriptor_proxy_v1",
+                        availability_status=descriptor_status,
+                        status_reason=descriptor_reason,
+                        skip_reason=None,
+                        failure_reason=descriptor_reason if descriptor_status == "unavailable" else None,
+                        upstream_orbital_extraction_status="success",
                     )
 
                     lone_pair_proxy = self._compute_atomic_lone_pair_heuristic_proxy(
@@ -1590,27 +1660,119 @@ class FeatureExtractor:
                         atomic_charge_iao_proxy=iao,
                         atom_symbols=[mol.atom_symbol(i) for i in range(mol.natm)],
                     )
-                    builder.set_atom_features(
-                        atomic_lone_pair_heuristic_proxy=lone_pair_proxy,
+                    lp_status, lp_reason = self._assess_proxy_list_availability(
+                        values=lone_pair_proxy,
+                        expected_len=natm_expected,
+                        field_name="atomic_lone_pair_heuristic_proxy",
+                    )
+                    if lp_status == "success":
+                        builder.set_atom_features(
+                            atomic_lone_pair_heuristic_proxy=lone_pair_proxy,
+                        )
+                    builder.set_atom_metadata(
+                        "atomic_lone_pair_heuristic_proxy",
+                        availability_status=lp_status,
+                        status_reason=lp_reason,
+                        skip_reason=None,
+                        failure_reason=lp_reason if lp_status == "unavailable" else None,
+                        upstream_orbital_extraction_status="success",
+                    )
+                elif orbital_status == "skipped":
+                    reason = normalized_skip_reason or "unknown_skip_reason"
+                    logger.info(f"[{molecule_id}] Orbital features skipped: {reason}")
+                    self._set_orbital_proxy_availability(
+                        builder=builder,
+                        availability_status="skipped",
+                        status_reason=f"upstream_orbital_skipped:{reason}",
+                        upstream_orbital_extraction_status="skipped",
+                        skip_reason=reason,
+                        failure_reason=None,
+                    )
+                elif orbital_status == "not_attempted":
+                    reason = "upstream_orbital_not_attempted"
+                    logger.info(f"[{molecule_id}] Orbital features not attempted")
+                    self._set_orbital_proxy_availability(
+                        builder=builder,
+                        availability_status="not_attempted",
+                        status_reason=reason,
+                        upstream_orbital_extraction_status="not_attempted",
+                        skip_reason=None,
+                        failure_reason=None,
                     )
                 else:
-                    reason = metadata.get("failure_reason", "unknown")
-                    logger.warning(f"[{molecule_id}] Orbital features soft-fail: {reason}")
-                    
+                    reason = normalized_failure_reason or "orbital_features_unavailable"
+                    logger.warning(f"[{molecule_id}] Orbital features unavailable: {reason}")
+                    self._set_orbital_proxy_availability(
+                        builder=builder,
+                        availability_status="unavailable",
+                        status_reason=f"upstream_orbital_unavailable:{reason}",
+                        upstream_orbital_extraction_status="unavailable",
+                        skip_reason=None,
+                        failure_reason=reason,
+                    )
+
             except Exception as e:
                 logger.error(f"[{molecule_id}] Orbital features extraction error: {e}")
                 logger.debug(f"[{molecule_id}] Orbital features traceback: {traceback.format_exc()}")
                 builder.set_orbital_metadata(
-                    extraction_status="failed",
+                    extraction_status="unavailable",
+                    skip_reason=None,
                     failure_reason="plugin_execution_error",
                     exception_detail=str(e)  # 保留原始异常在 metadata 中
+                )
+                self._set_orbital_proxy_availability(
+                    builder=builder,
+                    availability_status="unavailable",
+                    status_reason="upstream_orbital_unavailable:plugin_execution_error",
+                    upstream_orbital_extraction_status="unavailable",
+                    skip_reason=None,
+                    failure_reason="plugin_execution_error",
                 )
         elif orbital_skip_reason:
             # 策略性跳过
             logger.info(f"[{molecule_id}] Skipping orbital features: {orbital_skip_reason}")
             builder.set_orbital_metadata(
                 extraction_status="skipped",
-                failure_reason=orbital_skip_reason
+                skip_reason=orbital_skip_reason,
+                failure_reason=None
+            )
+            self._set_orbital_proxy_availability(
+                builder=builder,
+                availability_status="skipped",
+                status_reason=f"upstream_orbital_skipped:{orbital_skip_reason}",
+                upstream_orbital_extraction_status="skipped",
+                skip_reason=orbital_skip_reason,
+                failure_reason=None,
+            )
+        elif plugin_plan and "orbital_features" in plugin_plan and not should_run_orbital:
+            # 配置关闭但无显式 reason
+            builder.set_orbital_metadata(
+                extraction_status="skipped",
+                skip_reason="disabled_by_plan",
+                failure_reason=None,
+            )
+            self._set_orbital_proxy_availability(
+                builder=builder,
+                availability_status="skipped",
+                status_reason="upstream_orbital_skipped:disabled_by_plan",
+                upstream_orbital_extraction_status="skipped",
+                skip_reason="disabled_by_plan",
+                failure_reason=None,
+            )
+        elif should_run_orbital and (mol is None or mf is None):
+            # 前置计算未完成，未进入 orbital 计算
+            builder.set_orbital_metadata(
+                extraction_status="not_attempted",
+                skip_reason=None,
+                failure_reason=None,
+            )
+            self._set_orbital_proxy_availability(
+                builder=builder,
+                availability_status="not_attempted",
+                status_reason="upstream_orbital_not_attempted:core_prerequisite_missing",
+                upstream_orbital_extraction_status="not_attempted",
+                skip_reason=None,
+                failure_reason=None,
             )
         
         # ============ 步骤 11: 提取实空间特征（Milestone 3） ============
@@ -1757,7 +1919,7 @@ class FeatureExtractor:
                             "tool_version": critic2_result.bridge_tool_version,
                             "execution_time_seconds": critic2_result.bridge_execution_time_seconds,
                             "command": None,
-                            "parser_version": "critic2_adapter_v2",
+                            "parser_version": "critic2_adapter_v3",
                             "environment": None,
                         },
                         artifact_refs={
@@ -1850,6 +2012,125 @@ class FeatureExtractor:
         
         return result
 
+    def _normalize_availability_status(self, raw_status: Any) -> str:
+        """
+        Normalize status to canonical availability enum:
+        success | skipped | unavailable | not_attempted
+        """
+        s = str(raw_status).strip().lower() if raw_status is not None else "not_attempted"
+        if s in self.AVAILABILITY_STATUS_ENUM:
+            return s
+        if s in ("disabled",):
+            return "skipped"
+        if s in ("failed", "timeout", "error", "unknown"):
+            return "unavailable"
+        return "unavailable"
+
+    def _assess_proxy_list_availability(
+        self,
+        values: Any,
+        expected_len: Optional[int],
+        field_name: str,
+    ) -> Tuple[str, str]:
+        """Assess list-like proxy output quality for canonical writeback."""
+        if values is None:
+            return "unavailable", f"{field_name}_missing"
+        if not isinstance(values, list):
+            return "unavailable", f"{field_name}_invalid_type:{type(values).__name__}"
+        if isinstance(expected_len, int) and expected_len >= 0 and len(values) != expected_len:
+            return "unavailable", f"{field_name}_length_mismatch:{len(values)}!=expected:{expected_len}"
+        return "success", "ok"
+
+    def _assess_atomic_descriptor_proxy_availability(
+        self,
+        descriptor: Any,
+        natm: Optional[int],
+        field_name: str,
+    ) -> Tuple[str, str]:
+        """Assess fixed-shape atomic descriptor proxy output."""
+        if not isinstance(descriptor, dict):
+            return "unavailable", f"{field_name}_invalid_type:{type(descriptor).__name__}"
+        required = ["n_dominant_ibo", "sum_ibo_occupancy", "mean_localization_score", "contribution_entropy"]
+        for key in required:
+            arr = descriptor.get(key)
+            if not isinstance(arr, list):
+                return "unavailable", f"{field_name}_{key}_missing_or_invalid"
+            if isinstance(natm, int) and natm >= 0 and len(arr) != natm:
+                return "unavailable", f"{field_name}_{key}_length_mismatch:{len(arr)}!=expected:{natm}"
+        return "success", "ok"
+
+    def _set_orbital_proxy_availability(
+        self,
+        builder: UnifiedOutputBuilder,
+        availability_status: str,
+        status_reason: str,
+        upstream_orbital_extraction_status: str,
+        skip_reason: Optional[str],
+        failure_reason: Optional[str],
+    ) -> None:
+        """Write unified availability semantics to all orbital-dependent proxy metadata nodes."""
+        status = self._normalize_availability_status(availability_status)
+        upstream_status = self._normalize_availability_status(upstream_orbital_extraction_status)
+        builder.set_atom_metadata(
+            "atomic_lone_pair_heuristic_proxy",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
+            upstream_orbital_extraction_status=upstream_status,
+        )
+        builder.set_atom_metadata(
+            "atomic_orbital_descriptor_proxy_v1",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
+            upstream_orbital_extraction_status=upstream_status,
+        )
+        builder.set_bond_metadata(
+            "bond_orbital_localization_proxy",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
+            upstream_orbital_extraction_status=upstream_status,
+        )
+        builder.set_bond_metadata(
+            "bond_order_weighted_localization_proxy",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
+            upstream_orbital_extraction_status=upstream_status,
+        )
+
+    def _pick_external_integrated_property_values(
+        self,
+        property_map: Any,
+        aliases: List[str],
+    ) -> Tuple[Optional[List[Any]], Optional[str]]:
+        """Pick one property array from external integrated-property map by alias matching."""
+        if not isinstance(property_map, dict):
+            return None, None
+
+        def _norm(token: str) -> str:
+            return "".join(ch for ch in str(token).lower() if ch.isalnum())
+
+        normalized_aliases = [_norm(a) for a in aliases]
+        for alias in normalized_aliases:
+            for key, values in property_map.items():
+                if _norm(key) == alias:
+                    return values if isinstance(values, list) else None, str(key)
+        for alias in normalized_aliases:
+            for key, values in property_map.items():
+                if _norm(key).startswith(alias):
+                    return values if isinstance(values, list) else None, str(key)
+        for alias in normalized_aliases:
+            for key, values in property_map.items():
+                if alias and alias in _norm(key):
+                    return values if isinstance(values, list) else None, str(key)
+        return None, None
+
     def _assess_external_array_availability(
         self,
         execution_status: str,
@@ -1899,10 +2180,22 @@ class FeatureExtractor:
             .get("qtaim", {})
         ) or {}
         qtaim_meta = qtaim.get("metadata") if isinstance(qtaim.get("metadata"), dict) else {}
+        atomic_integrated_properties = qtaim.get("atomic_integrated_properties")
+
+        bader_population_values = qtaim.get("bader_populations")
+        bader_population_source_key = "qtaim.bader_populations"
+        if bader_population_values is None:
+            picked_values, picked_key = self._pick_external_integrated_property_values(
+                atomic_integrated_properties,
+                aliases=["Pop", "Population", "ElectronPopulation", "ElectronPop"],
+            )
+            if picked_values is not None:
+                bader_population_values = picked_values
+                bader_population_source_key = f"qtaim.atomic_integrated_properties.{picked_key}"
 
         bader_population_status, bader_population_reason, bader_populations = self._assess_external_array_availability(
             execution_status=execution_status,
-            values=qtaim.get("bader_populations"),
+            values=bader_population_values,
             natm=natm,
             field_name="bader_populations",
         )
@@ -1972,9 +2265,20 @@ class FeatureExtractor:
                         f"bader_charge_sum_mismatch:{charge_sum:.6f}!=molecule_charge:{float(total_charge):.6f}"
                     )
 
+        bader_volume_values = qtaim.get("bader_volumes")
+        bader_volume_source_key = "qtaim.bader_volumes"
+        if bader_volume_values is None:
+            picked_values, picked_key = self._pick_external_integrated_property_values(
+                atomic_integrated_properties,
+                aliases=["Volume", "Vol"],
+            )
+            if picked_values is not None:
+                bader_volume_values = picked_values
+                bader_volume_source_key = f"qtaim.atomic_integrated_properties.{picked_key}"
+
         bader_volume_status, bader_volume_reason, bader_volumes = self._assess_external_array_availability(
             execution_status=execution_status,
-            values=qtaim.get("bader_volumes"),
+            values=bader_volume_values,
             natm=natm,
             field_name="bader_volumes",
         )
@@ -2021,7 +2325,8 @@ class FeatureExtractor:
             charge_meta["bader_population_sum_tolerance"] = population_sum_tolerance
             charge_meta["bader_population_sum_tol_abs"] = self.BADER_POPULATION_SUM_ABS_TOL_E
             charge_meta["bader_population_sum_tol_rel"] = self.BADER_POPULATION_SUM_REL_TOL
-            charge_meta["bader_population_source"] = qtaim_meta.get("atomic_property_source")
+            charge_meta["bader_population_source"] = bader_population_source_key
+            charge_meta["bader_volume_source"] = bader_volume_source_key
             charge_meta["bader_population_parser_note"] = qtaim_meta.get("atomic_property_parse_note")
 
         logger.debug(

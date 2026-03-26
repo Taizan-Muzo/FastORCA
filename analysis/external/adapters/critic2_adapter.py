@@ -251,6 +251,7 @@ class Critic2Adapter(ExternalAdapter):
                 "bader_populations": None,
                 "bader_volumes": None,
                 "n_bader_volumes": 0,
+                "atomic_integrated_properties": None,
                 "metadata": {
                     "atomic_property_parser": "none",
                     "atomic_property_source": None,
@@ -262,6 +263,7 @@ class Critic2Adapter(ExternalAdapter):
                     "atomic_property_volume_available": False,
                     "atomic_property_parse_note": None,
                     "atomic_property_table_excerpt": [],
+                    "atomic_integrated_property_columns": None,
                 },
             }
         }
@@ -332,6 +334,10 @@ class Critic2Adapter(ExternalAdapter):
             features["qtaim"]["bader_populations"] = bader_populations
             features["qtaim"]["bader_volumes"] = bader_volumes
             features["qtaim"]["n_bader_volumes"] = len(bader_volumes)
+            features["qtaim"]["atomic_integrated_properties"] = {
+                "Population": [float(x) for x in bader_populations],
+                "Volume": [float(x) for x in bader_volumes],
+            }
             features["qtaim"]["metadata"].update(
                 {
                     "atomic_property_parser": "atomic_properties_table_v1",
@@ -343,13 +349,16 @@ class Critic2Adapter(ExternalAdapter):
                     "atomic_property_volume_column": "Volume",
                     "atomic_property_volume_available": True,
                     "atomic_property_parse_note": "parsed_from_atomic_properties_table",
+                    "atomic_integrated_property_columns": ["Population", "Volume"],
                 }
             )
             logger.info(f"Parsed {len(bader_charges)} Bader volumes")
         else:
             # Fallback parser for "Integrated atomic properties" table (YT/BADER outputs)
-            charges2, populations2, volumes2, parse_meta = self._parse_integrated_atomic_properties(content)
+            charges2, populations2, volumes2, parse_meta, integrated_properties = self._parse_integrated_atomic_properties(content)
             features["qtaim"]["metadata"].update(parse_meta)
+            if isinstance(integrated_properties, dict) and integrated_properties:
+                features["qtaim"]["atomic_integrated_properties"] = integrated_properties
             if charges2:
                 features["qtaim"]["bader_charges"] = charges2
                 features["qtaim"]["bader_populations"] = populations2
@@ -386,7 +395,7 @@ class Critic2Adapter(ExternalAdapter):
 
     def _parse_integrated_atomic_properties(
         self, content: str
-    ) -> tuple[List[float], List[float], Optional[List[Optional[float]]], Dict[str, Any]]:
+    ) -> tuple[List[float], List[float], Optional[List[Optional[float]]], Dict[str, Any], Optional[Dict[str, List[Optional[float]]]]]:
         """
         解析 Integrated atomic properties 表：
         # Id cp ncp Name Z mult <integrables...>
@@ -406,6 +415,10 @@ class Critic2Adapter(ExternalAdapter):
         pop_idx: Optional[int] = None
         vol_idx: Optional[int] = None
         z_idx: Optional[int] = None
+        mult_idx: Optional[int] = None
+        property_columns: List[str] = []
+        property_indices: List[int] = []
+        property_values: Dict[str, List[Optional[float]]] = {}
         parse_note = "integrated_atomic_properties_not_found"
         source = "Integrated atomic properties"
 
@@ -445,6 +458,20 @@ class Critic2Adapter(ExternalAdapter):
                         header_tokens_norm,
                         ["Volume", "Vol"],
                     )
+                    mult_idx = self._pick_column_index(
+                        header_tokens_raw,
+                        header_tokens_norm,
+                        ["mult"],
+                    )
+                    property_columns = []
+                    property_indices = []
+                    property_values = {}
+                    if mult_idx is not None:
+                        for idx in range(mult_idx + 1, len(header_tokens_raw)):
+                            col = header_tokens_raw[idx]
+                            property_columns.append(col)
+                            property_indices.append(idx)
+                            property_values[col] = []
                     if pop_idx is None:
                         parse_note = "integrated_header_found_but_pop_column_missing"
                     else:
@@ -473,6 +500,14 @@ class Critic2Adapter(ExternalAdapter):
             charges.append(float(z - pop))
             populations.append(float(pop))
             volumes.append(volume)
+            for col, col_idx in zip(property_columns, property_indices):
+                val: Optional[float] = None
+                if col_idx < len(parts):
+                    try:
+                        val = float(parts[col_idx])
+                    except (ValueError, TypeError):
+                        val = None
+                property_values[col].append(val)
 
         if populations and pop_idx is not None:
             parse_note = "integrated_atomic_properties_parsed"
@@ -480,6 +515,12 @@ class Critic2Adapter(ExternalAdapter):
         volume_values: Optional[List[Optional[float]]] = volumes if vol_idx is not None else None
         if vol_idx is None and populations:
             parse_note = "integrated_atomic_properties_parsed_without_volume_column"
+
+        # Keep only meaningful columns (at least one numeric value parsed).
+        cleaned_property_values: Dict[str, List[Optional[float]]] = {}
+        for col, vals in property_values.items():
+            if any(v is not None for v in vals):
+                cleaned_property_values[col] = vals
 
         parse_meta: Dict[str, Any] = {
             "atomic_property_parser": "integrated_atomic_properties_v2",
@@ -492,9 +533,10 @@ class Critic2Adapter(ExternalAdapter):
             "atomic_property_volume_available": vol_idx is not None,
             "atomic_property_parse_note": parse_note,
             "atomic_property_table_excerpt": table_excerpt,
+            "atomic_integrated_property_columns": list(cleaned_property_values.keys()) if cleaned_property_values else None,
         }
 
-        return charges, populations, volume_values, parse_meta
+        return charges, populations, volume_values, parse_meta, (cleaned_property_values or None)
     
     def _parse_version(self, content: str) -> Optional[str]:
         """解析 critic2 版本"""

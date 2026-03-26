@@ -60,9 +60,9 @@ class OrbitalFeatureExtractor:
         # Step 1: 闭壳层检查
         is_closed_shell, reason = self._check_closed_shell(mol, mf)
         if not is_closed_shell:
-            result["metadata"]["extraction_status"] = "failed"
+            result["metadata"]["extraction_status"] = "unavailable"
             result["metadata"]["failure_reason"] = reason
-            logger.warning(f"Orbital features skipped: {reason}")
+            logger.warning(f"Orbital features unavailable: {reason}")
             return result
         
         try:
@@ -123,7 +123,7 @@ class OrbitalFeatureExtractor:
             
             # 验证
             if not self._validate_orbital_features(result, mol.natm):
-                result["metadata"]["extraction_status"] = "failed"
+                result["metadata"]["extraction_status"] = "unavailable"
                 result["metadata"]["failure_reason"] = "validation_failed"
                 logger.warning("Orbital features validation failed")
             else:
@@ -133,7 +133,7 @@ class OrbitalFeatureExtractor:
                 logger.info(f"Orbital features extracted: {n_ibo} IBOs in {elapsed:.3f}s")
             
         except Exception as e:
-            result["metadata"]["extraction_status"] = "failed"
+            result["metadata"]["extraction_status"] = "unavailable"
             result["metadata"]["failure_reason"] = f"exception: {str(e)}"
             logger.error(f"Orbital features extraction failed: {e}")
             import traceback
@@ -162,6 +162,7 @@ class OrbitalFeatureExtractor:
                 "classification_is_heuristic": True,
                 "heuristic_classification_rules": "lone_pair_like: p1>0.75 && p2<0.20; bond_like: p1+p2>0.80 && p1>0.25 && p2>0.25; delocalized_like: otherwise",
                 "extraction_status": "not_attempted",
+                "skip_reason": None,
                 "failure_reason": None,
                 "extraction_time_seconds": None,
                 "pyscf_version": self._get_pyscf_version(),

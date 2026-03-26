@@ -180,8 +180,8 @@ class StatusDeterminer:
         """
         统计"应执行但失败"的插件数量
         
-        注意：这里只检查 extraction_status，实际应在调用时结合 config 判断
-        此处假设：metadata.extraction_status == "failed" 表示已尝试但失败
+        注意：这里只检查 extraction_status，实际应在调用时结合 config 判断。
+        可用性语义统一后，已尝试但不可用使用 unavailable。
         """
         count = 0
         
@@ -190,7 +190,7 @@ class StatusDeterminer:
             metadata = self._get(f"{plugin}.metadata") or {}
             status = metadata.get("extraction_status")
             
-            if status in ("failed", "timeout", "error"):
+            if status in ("failed", "timeout", "error", "unavailable"):
                 failure_reason = metadata.get("failure_reason")
                 if failure_reason and failure_reason not in self.reason_codes:
                     self.reason_codes.append(failure_reason)

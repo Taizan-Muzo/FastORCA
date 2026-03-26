@@ -362,6 +362,11 @@ class UnifiedOutputBuilder:
                         "is_heuristic": True,
                         "equivalent_to_nbo_lp": False,
                         "definition_version": "v1",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "upstream_orbital_extraction_status": "not_attempted",
                         "inputs_used": [
                             "orbital_features.ibo_atom_contributions",
                             "orbital_features.ibo_occupancies",
@@ -379,6 +384,11 @@ class UnifiedOutputBuilder:
                     "atomic_orbital_descriptor_proxy_v1": {
                         "is_proxy": True,
                         "is_heuristic": False,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "upstream_orbital_extraction_status": "not_attempted",
                         "field_order": [
                             "n_dominant_ibo",
                             "sum_ibo_occupancy",
@@ -430,6 +440,11 @@ class UnifiedOutputBuilder:
                     "bond_orbital_localization_proxy": {
                         "definition_version": "v1",
                         "formula": "max_k(c_{k,i}+c_{k,j}) over bonding-candidate IBOs",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "upstream_orbital_extraction_status": "not_attempted",
                         "ibo_candidate_rules": {
                             "occupancy_min": 1.5,
                             "ci_min": 0.20,
@@ -445,6 +460,11 @@ class UnifiedOutputBuilder:
                     "bond_order_weighted_localization_proxy": {
                         "definition_version": "v1",
                         "formula": "bond_orbital_localization_proxy * bond_delocalization_index_proxy_v1",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "upstream_orbital_extraction_status": "not_attempted",
                         "is_proxy": True,
                         "is_heuristic": True,
                         "limitations": [
@@ -558,30 +578,31 @@ class UnifiedOutputBuilder:
                 "schema_build_finalized": False
             },
             
-            "orbital_features": {
-                "local_orbital_method": None,
-                "ibo_count": None,
-                "ibo_occupancies": None,
-                "ibo_centers_angstrom": None,
+                "orbital_features": {
+                    "local_orbital_method": None,
+                    "ibo_count": None,
+                    "ibo_occupancies": None,
+                    "ibo_centers_angstrom": None,
                 "ibo_atom_contributions": None,
                 "ibo_class_heuristic": None,
                 "orbital_locality_score": None,
                 "iao_atom_mapping": None,
-                "metadata": {
-                    "coefficient_basis": None,
-                    "coefficient_metric": None,
-                    "center_definition": None,
-                    "contribution_definition": None,
-                    "occupancy_definition": None,
-                    "locality_score_formula": None,
-                    "classification_is_heuristic": None,
-                    "heuristic_classification_rules": None,
-                    "extraction_status": None,
-                    "failure_reason": None,
-                    "extraction_time_seconds": None,
-                    "pyscf_version": None,
-                }
-            },
+                    "metadata": {
+                        "coefficient_basis": None,
+                        "coefficient_metric": None,
+                        "center_definition": None,
+                        "contribution_definition": None,
+                        "occupancy_definition": None,
+                        "locality_score_formula": None,
+                        "classification_is_heuristic": None,
+                        "heuristic_classification_rules": None,
+                        "extraction_status": "not_attempted",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "extraction_time_seconds": None,
+                        "pyscf_version": None,
+                    }
+                },
             
             "realspace_features": {
                 "density_isosurface_volume": None,
@@ -650,20 +671,32 @@ class UnifiedOutputBuilder:
                 }
             },
             
-            "external_features": {
-                "critic2": {
-                    "qtaim": {
-                        "bader_charges": None,
-                        "bader_populations": None,
-                        "bader_volumes": None,
-                        "n_bader_volumes": None,
-                        "metadata": {
-                            "analysis_type": None,
-                            "convergence_status": None,
+                "external_features": {
+                    "critic2": {
+                        "qtaim": {
+                            "bader_charges": None,
+                            "bader_populations": None,
+                            "bader_volumes": None,
+                            "n_bader_volumes": None,
+                            "atomic_integrated_properties": None,
+                            "metadata": {
+                                "analysis_type": None,
+                                "convergence_status": None,
+                                "atomic_property_parser": None,
+                                "atomic_property_source": None,
+                                "atomic_property_header_tokens": None,
+                                "atomic_property_header_token_count": None,
+                                "atomic_property_rows_parsed": None,
+                                "atomic_property_pop_column": None,
+                                "atomic_property_volume_column": None,
+                                "atomic_property_volume_available": None,
+                                "atomic_property_parse_note": None,
+                                "atomic_property_table_excerpt": None,
+                                "atomic_integrated_property_columns": None,
+                            }
                         }
                     }
-                }
-            },
+                },
 
             # External bridge roadmap placeholders (M5.5)
             # Keep exact qcMol naming decisions deferred where marked by needs_exact_qcmol_name.
