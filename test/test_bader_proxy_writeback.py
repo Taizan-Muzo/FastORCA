@@ -1,5 +1,6 @@
 from consumer.feature_extractor import FeatureExtractor
 from utils.output_schema import UnifiedOutputBuilder
+from analysis.external.adapters.critic2_adapter import Critic2Adapter
 
 
 def _make_builder(natm: int = 3) -> UnifiedOutputBuilder:
@@ -50,7 +51,8 @@ def test_bader_proxy_success_for_charge_and_volume():
     meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_charge_proxy"]
     assert meta["bader_status"] == "success"
     assert meta["bader_volume_status"] == "success"
-    assert builder.data["atom_features"]["atomic_density_partition_charge_proxy"]["bader"] == [0.1, -0.2, 0.1]
+    charges = builder.data["atom_features"]["atomic_density_partition_charge_proxy"]["bader"]
+    assert [round(x, 6) for x in charges] == [0.1, -0.2, 0.1]
     assert builder.data["atom_features"]["atomic_density_partition_volume_proxy"]["bader"] == [12.0, 8.0, 6.0]
 
 
@@ -124,3 +126,50 @@ def test_bader_population_sum_mismatch_marks_charge_unavailable():
     assert "population_sum_mismatch" in meta["bader_status_reason"]
     assert meta["bader_volume_status"] == "success"
     assert builder.data["atom_features"]["atomic_density_partition_charge_proxy"]["bader"] is None
+
+
+def test_bader_volume_missing_after_success_has_specific_reason():
+    fx = FeatureExtractor()
+    builder = _make_builder(natm=3)
+    builder.set_external_bridge("critic2", execution_status="success", failure_reason=None)
+    builder.set_external_features(
+        "critic2",
+        {
+            "qtaim": {
+                "bader_populations": [5.9, 8.2, 0.9],
+                "bader_volumes": None,
+                "metadata": {
+                    "atomic_property_parse_note": "integrated_atomic_properties_parsed_without_volume_column",
+                },
+            }
+        },
+    )
+
+    fx._sync_bader_partition_proxy_from_external(builder, "m_test")
+    meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_charge_proxy"]
+    assert meta["bader_status"] == "success"
+    assert meta["bader_volume_status"] == "unavailable"
+    assert "not_reported" in meta["bader_volume_status_reason"]
+    assert builder.data["atom_features"]["atomic_density_partition_volume_proxy"]["bader"] is None
+
+
+def test_integrated_atomic_property_parser_prefers_pop_column():
+    adapter = Critic2Adapter()
+    content = """
+* Integrated atomic properties
+# Integrable properties in this table: Pop Lap
+# Id cp ncp Name Z mult Pop Lap
+  1  1  1  C  6  1  5.900000  -0.111000
+  2  2  2  O  8  1  8.200000  -0.222000
+  3  3  3  H  1  1  0.900000  -0.333000
+
+* Integrated molecular properties
+""".strip("\n")
+
+    charges, populations, volumes, parse_meta = adapter._parse_integrated_atomic_properties(content)
+
+    assert populations == [5.9, 8.2, 0.9]
+    assert [round(x, 6) for x in charges] == [0.1, -0.2, 0.1]
+    assert volumes is None
+    assert parse_meta["atomic_property_pop_column"] == "Pop"
+    assert parse_meta["atomic_property_volume_available"] is False

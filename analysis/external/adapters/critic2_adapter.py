@@ -251,6 +251,18 @@ class Critic2Adapter(ExternalAdapter):
                 "bader_populations": None,
                 "bader_volumes": None,
                 "n_bader_volumes": 0,
+                "metadata": {
+                    "atomic_property_parser": "none",
+                    "atomic_property_source": None,
+                    "atomic_property_header_tokens": None,
+                    "atomic_property_header_token_count": 0,
+                    "atomic_property_rows_parsed": 0,
+                    "atomic_property_pop_column": None,
+                    "atomic_property_volume_column": None,
+                    "atomic_property_volume_available": False,
+                    "atomic_property_parse_note": None,
+                    "atomic_property_table_excerpt": [],
+                },
             }
         }
         
@@ -320,41 +332,97 @@ class Critic2Adapter(ExternalAdapter):
             features["qtaim"]["bader_populations"] = bader_populations
             features["qtaim"]["bader_volumes"] = bader_volumes
             features["qtaim"]["n_bader_volumes"] = len(bader_volumes)
+            features["qtaim"]["metadata"].update(
+                {
+                    "atomic_property_parser": "atomic_properties_table_v1",
+                    "atomic_property_source": "Atomic properties",
+                    "atomic_property_header_tokens": ["Id", "Z", "Name", "Population", "Volume"],
+                    "atomic_property_header_token_count": 5,
+                    "atomic_property_rows_parsed": len(bader_charges),
+                    "atomic_property_pop_column": "Population",
+                    "atomic_property_volume_column": "Volume",
+                    "atomic_property_volume_available": True,
+                    "atomic_property_parse_note": "parsed_from_atomic_properties_table",
+                }
+            )
             logger.info(f"Parsed {len(bader_charges)} Bader volumes")
         else:
             # Fallback parser for "Integrated atomic properties" table (YT/BADER outputs)
-            charges2, populations2, volumes2 = self._parse_integrated_atomic_properties(content)
+            charges2, populations2, volumes2, parse_meta = self._parse_integrated_atomic_properties(content)
+            features["qtaim"]["metadata"].update(parse_meta)
             if charges2:
                 features["qtaim"]["bader_charges"] = charges2
                 features["qtaim"]["bader_populations"] = populations2
                 features["qtaim"]["bader_volumes"] = volumes2
-                features["qtaim"]["n_bader_volumes"] = len(volumes2)
+                features["qtaim"]["n_bader_volumes"] = len(volumes2) if isinstance(volumes2, list) else 0
                 logger.info(f"Parsed {len(charges2)} atomic properties from integrated table")
             else:
                 logger.warning("No Bader data found in output")
         
         return features
 
-    def _parse_integrated_atomic_properties(self, content: str) -> tuple[List[float], List[float], List[Optional[float]]]:
+    @staticmethod
+    def _normalize_column_name(token: str) -> str:
+        """Normalize critic2 header token for robust column matching."""
+        return re.sub(r"[^a-z0-9]+", "", token.lower())
+
+    @staticmethod
+    def _pick_column_index(raw_tokens: List[str], normalized_tokens: List[str], candidates: List[str]) -> Optional[int]:
+        """Pick a column index by exact, prefix, then contains matching."""
+        normalized_candidates = [Critic2Adapter._normalize_column_name(c) for c in candidates]
+        for candidate in normalized_candidates:
+            for idx, token in enumerate(normalized_tokens):
+                if token == candidate:
+                    return idx
+        for candidate in normalized_candidates:
+            for idx, token in enumerate(normalized_tokens):
+                if token.startswith(candidate):
+                    return idx
+        for candidate in normalized_candidates:
+            for idx, token in enumerate(normalized_tokens):
+                if candidate and candidate in token:
+                    return idx
+        return None
+
+    def _parse_integrated_atomic_properties(
+        self, content: str
+    ) -> tuple[List[float], List[float], Optional[List[Optional[float]]], Dict[str, Any]]:
         """
         解析 Integrated atomic properties 表：
-        # Id cp ncp Name Z mult Volume Pop Lap ...
+        # Id cp ncp Name Z mult <integrables...>
+
+        NOTE:
+        仅在识别到真正表头（"# Id ... mult ...") 时才会进行列映射，
+        避免把其它 "#" 说明行错误当成表头导致列错位。
         """
         lines = content.split('\n')
         in_table = False
-        header_map: Dict[str, int] = {}
+        header_tokens_raw: List[str] = []
+        header_tokens_norm: List[str] = []
         charges: List[float] = []
         populations: List[float] = []
         volumes: List[Optional[float]] = []
+        table_excerpt: List[str] = []
+        pop_idx: Optional[int] = None
+        vol_idx: Optional[int] = None
+        z_idx: Optional[int] = None
+        parse_note = "integrated_atomic_properties_not_found"
+        source = "Integrated atomic properties"
 
         for line in lines:
             if "Integrated atomic properties" in line:
                 in_table = True
+                parse_note = "integrated_atomic_properties_found"
+                if len(table_excerpt) < 12:
+                    table_excerpt.append(line.rstrip())
                 continue
             if not in_table:
                 continue
 
             s = line.strip()
+            if len(table_excerpt) < 12:
+                table_excerpt.append(line.rstrip())
+
             if not s:
                 if charges:
                     break
@@ -362,8 +430,25 @@ class Critic2Adapter(ExternalAdapter):
             if s.startswith("* Integrated molecular properties") or s.startswith("critic2:"):
                 break
             if s.startswith("#"):
-                cols = s.lstrip("#").split()
-                header_map = {name: idx for idx, name in enumerate(cols)}
+                # Only accept the canonical table header.
+                if re.match(r"^#\s*Id\b", s, flags=re.IGNORECASE):
+                    header_tokens_raw = s.lstrip("#").split()
+                    header_tokens_norm = [self._normalize_column_name(tok) for tok in header_tokens_raw]
+                    z_idx = self._pick_column_index(header_tokens_raw, header_tokens_norm, ["Z"])
+                    pop_idx = self._pick_column_index(
+                        header_tokens_raw,
+                        header_tokens_norm,
+                        ["Pop", "Population", "ElectronPopulation", "ElectronPop"],
+                    )
+                    vol_idx = self._pick_column_index(
+                        header_tokens_raw,
+                        header_tokens_norm,
+                        ["Volume", "Vol"],
+                    )
+                    if pop_idx is None:
+                        parse_note = "integrated_header_found_but_pop_column_missing"
+                    else:
+                        parse_note = "integrated_header_found"
                 continue
             if set(s) == {"-"}:
                 continue
@@ -371,14 +456,10 @@ class Critic2Adapter(ExternalAdapter):
             parts = s.split()
             if not parts or not parts[0].isdigit():
                 continue
+            if pop_idx is None:
+                continue
             try:
-                z_idx = header_map.get("Z", 4)
-                pop_idx = header_map.get("Pop")
-                vol_idx = header_map.get("Volume")
-                if pop_idx is None:
-                    # fallback for unexpected headers: legacy assumption
-                    pop_idx = 7 if len(parts) > 7 else None
-                if pop_idx is None or z_idx >= len(parts) or pop_idx >= len(parts):
+                if z_idx is None or z_idx >= len(parts) or pop_idx >= len(parts):
                     continue
 
                 z = int(parts[z_idx])
@@ -393,7 +474,27 @@ class Critic2Adapter(ExternalAdapter):
             populations.append(float(pop))
             volumes.append(volume)
 
-        return charges, populations, volumes
+        if populations and pop_idx is not None:
+            parse_note = "integrated_atomic_properties_parsed"
+
+        volume_values: Optional[List[Optional[float]]] = volumes if vol_idx is not None else None
+        if vol_idx is None and populations:
+            parse_note = "integrated_atomic_properties_parsed_without_volume_column"
+
+        parse_meta: Dict[str, Any] = {
+            "atomic_property_parser": "integrated_atomic_properties_v2",
+            "atomic_property_source": source,
+            "atomic_property_header_tokens": header_tokens_raw or None,
+            "atomic_property_header_token_count": len(header_tokens_raw),
+            "atomic_property_rows_parsed": len(populations),
+            "atomic_property_pop_column": header_tokens_raw[pop_idx] if (pop_idx is not None and pop_idx < len(header_tokens_raw)) else None,
+            "atomic_property_volume_column": header_tokens_raw[vol_idx] if (vol_idx is not None and vol_idx < len(header_tokens_raw)) else None,
+            "atomic_property_volume_available": vol_idx is not None,
+            "atomic_property_parse_note": parse_note,
+            "atomic_property_table_excerpt": table_excerpt,
+        }
+
+        return charges, populations, volume_values, parse_meta
     
     def _parse_version(self, content: str) -> Optional[str]:
         """解析 critic2 版本"""

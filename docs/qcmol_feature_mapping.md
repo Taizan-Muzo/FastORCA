@@ -145,7 +145,19 @@ Frozen formulas/constraints:
 - Semantics:
   - `not_attempted`: critic2 was not run (`external_bridge.critic2.execution_status in {not_attempted, disabled, skipped}`)
   - `unavailable`: critic2 attempted but failed/timeout, or returned missing/invalid-length arrays
-  - `success`: parsed list exists and is aligned to `natm`
+  - `success`: parsed list exists, is aligned to `natm`, and passes consistency checks
+- Validation and writeback rule:
+  - `external_features.critic2.qtaim` may keep raw parsed arrays for diagnosis.
+  - canonical atom fields only accept validated values:
+    - `atom_features.atomic_density_partition_charge_proxy.bader = q_i = Z_i - N_i(Bader)`
+    - charge writeback gate: `|sum(N_i)-N_expected| <= max(0.50 e, 0.02 * N_expected)`
+    - if gate fails, canonical `bader` is set to `null` with `bader_status=unavailable`
+- Volume semantics:
+  - if critic2 output does not provide a usable volume column, keep
+    `atom_features.atomic_density_partition_volume_proxy.bader = null`
+  - distinguish reasons via `bader_volume_status_reason`, e.g.:
+    - `bader_volume_column_not_reported_in_critic2_output`
+    - `bader_volume_column_present_but_all_null`
 
 ## bond_indices Semantics
 

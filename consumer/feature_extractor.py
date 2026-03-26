@@ -49,6 +49,11 @@ class FeatureExtractor:
     - 键级：Mayer、Wiberg
     - NBO 分析（如果可用）
     """
+
+    # Bader population consistency guard:
+    # pass if |sum(N_i) - expected_electrons| <= max(abs_tol, rel_tol * expected_electrons)
+    BADER_POPULATION_SUM_ABS_TOL_E = 0.50
+    BADER_POPULATION_SUM_REL_TOL = 0.02
     
     def __init__(
         self,
@@ -1752,7 +1757,7 @@ class FeatureExtractor:
                             "tool_version": critic2_result.bridge_tool_version,
                             "execution_time_seconds": critic2_result.bridge_execution_time_seconds,
                             "command": None,
-                            "parser_version": "critic2_adapter_v1",
+                            "parser_version": "critic2_adapter_v2",
                             "environment": None,
                         },
                         artifact_refs={
@@ -1893,6 +1898,7 @@ class FeatureExtractor:
             .get("critic2", {})
             .get("qtaim", {})
         ) or {}
+        qtaim_meta = qtaim.get("metadata") if isinstance(qtaim.get("metadata"), dict) else {}
 
         bader_population_status, bader_population_reason, bader_populations = self._assess_external_array_availability(
             execution_status=execution_status,
@@ -1903,6 +1909,9 @@ class FeatureExtractor:
         bader_charge_status = "unavailable"
         bader_charge_reason = "bader_charge_not_computed"
         bader_charges: Optional[List[float]] = None
+        expected_electrons: Optional[float] = None
+        parsed_population_sum: Optional[float] = None
+        population_sum_tolerance: Optional[float] = None
 
         atomic_numbers = data.get("atom_features", {}).get("atomic_number")
         total_charge = data.get("molecule_info", {}).get("charge")
@@ -1915,13 +1924,28 @@ class FeatureExtractor:
             # Sanity-check: sum(N_i) should approximately equal total electrons.
             if isinstance(total_charge, (int, float)):
                 expected_electrons = float(sum(float(z) for z in atomic_numbers) - float(total_charge))
-                parsed_electrons = float(sum(float(pop) for pop in bader_populations))
-                electron_tol = max(0.5, 0.02 * expected_electrons)
-                if abs(parsed_electrons - expected_electrons) > electron_tol:
+                parsed_population_sum = float(sum(float(pop) for pop in bader_populations))
+                population_sum_tolerance = max(
+                    self.BADER_POPULATION_SUM_ABS_TOL_E,
+                    self.BADER_POPULATION_SUM_REL_TOL * max(1.0, abs(expected_electrons)),
+                )
+                if abs(parsed_population_sum - expected_electrons) > population_sum_tolerance:
                     bader_charges = None
                     bader_charge_status = "unavailable"
                     bader_charge_reason = (
-                        f"bader_population_sum_mismatch:{parsed_electrons:.6f}!=expected:{expected_electrons:.6f}"
+                        f"bader_population_sum_mismatch:{parsed_population_sum:.6f}"
+                        f"!=expected:{expected_electrons:.6f}|tol:{population_sum_tolerance:.6f}"
+                    )
+                    density_artifact = (data.get("artifacts", {}) or {}).get("cube_files", {}).get("density", {}) or {}
+                    logger.warning(
+                        f"[{molecule_id}] Bader population mismatch: expected={expected_electrons:.6f}, "
+                        f"parsed={parsed_population_sum:.6f}, tol={population_sum_tolerance:.6f}, "
+                        f"per_atom={bader_populations}, grid={density_artifact.get('grid_shape')}, "
+                        f"spacing={density_artifact.get('spacing_angstrom')}, "
+                        f"origin={density_artifact.get('origin_angstrom')}, "
+                        f"parser_note={qtaim_meta.get('atomic_property_parse_note')}, "
+                        f"parser_source={qtaim_meta.get('atomic_property_source')}, "
+                        f"header={qtaim_meta.get('atomic_property_header_tokens')}"
                     )
                 else:
                     bader_charge_status = "success"
@@ -1954,11 +1978,21 @@ class FeatureExtractor:
             natm=natm,
             field_name="bader_volumes",
         )
+        if (
+            bader_volume_status == "unavailable"
+            and bader_volume_reason == "bader_volumes_missing_after_success"
+            and execution_status == "success"
+        ):
+            parser_note = qtaim_meta.get("atomic_property_parse_note")
+            if parser_note == "integrated_atomic_properties_parsed_without_volume_column":
+                bader_volume_reason = "bader_volume_column_not_reported_in_critic2_output"
+            else:
+                bader_volume_reason = "bader_volumes_missing_after_success"
         if bader_volume_status == "success" and isinstance(bader_volumes, list):
             # Success requires at least one real numeric volume; all-null should be unavailable.
             if not any(v is not None for v in bader_volumes):
                 bader_volume_status = "unavailable"
-                bader_volume_reason = "bader_volumes_all_null_after_success"
+                bader_volume_reason = "bader_volume_column_present_but_all_null"
                 bader_volumes = None
 
         current_partition = data.get("atom_features", {}).get("atomic_density_partition_charge_proxy") or {}
@@ -1979,6 +2013,16 @@ class FeatureExtractor:
             bader_volume_status=bader_volume_status,
             bader_volume_status_reason=bader_volume_reason,
         )
+        # Extended diagnostics for downstream triage (stored in existing metadata container).
+        charge_meta = data.get("atom_features", {}).get("metadata", {}).get("atomic_density_partition_charge_proxy")
+        if isinstance(charge_meta, dict):
+            charge_meta["bader_population_expected_electrons"] = expected_electrons
+            charge_meta["bader_population_sum"] = parsed_population_sum
+            charge_meta["bader_population_sum_tolerance"] = population_sum_tolerance
+            charge_meta["bader_population_sum_tol_abs"] = self.BADER_POPULATION_SUM_ABS_TOL_E
+            charge_meta["bader_population_sum_tol_rel"] = self.BADER_POPULATION_SUM_REL_TOL
+            charge_meta["bader_population_source"] = qtaim_meta.get("atomic_property_source")
+            charge_meta["bader_population_parser_note"] = qtaim_meta.get("atomic_property_parse_note")
 
         logger.debug(
             f"[{molecule_id}] Bader proxy sync: execution_status={execution_status}, "
