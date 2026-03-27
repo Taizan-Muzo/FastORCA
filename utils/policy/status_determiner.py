@@ -76,17 +76,21 @@ class StatusDeterminer:
     def _check_invalid_input(self) -> Optional[str]:
         """检查 Level 1: invalid_input"""
         calc_status = self._get("calculation_status")
+        has_success_evidence = self._has_success_execution_evidence()
+
         if not calc_status:
+            # 兼容消费已有 pkl/unified 的模式：
+            # 没有输入解析上下文时，只要已有成功执行证据，就不应判定 invalid_input。
+            if has_success_evidence:
+                return None
             self.reason_codes.append("invalid_smiles")
             return "invalid_input"
         
         if calc_status.get("invalid_input", False):
-            self.reason_codes.append("invalid_smiles")
-            return "invalid_input"
-        
-        # 检查基本字段
-        smiles = self._get("molecule_info.smiles")
-        if not smiles:
+            # 如果已出现成功执行证据，说明 invalid_input 标志是陈旧或不适用的输入侧信号，
+            # 不能覆盖真实执行结果。
+            if has_success_evidence:
+                return None
             self.reason_codes.append("invalid_smiles")
             return "invalid_input"
         
@@ -100,6 +104,22 @@ class StatusDeterminer:
             return "invalid_input"
         
         return None
+
+    def _has_success_execution_evidence(self) -> bool:
+        """判断是否已有成功执行证据（用于避免输入态误判覆盖执行态）。"""
+        if self._get("calculation_status.wavefunction_load_success") is True:
+            return True
+        if self._get("calculation_status.scf_convergence_success") is True:
+            return True
+        if self._get("calculation_status.core_features_success") is True:
+            return True
+        if self._get("global_features.dft.total_energy_hartree") is not None:
+            return True
+        if self._get("geometry.atom_symbols"):
+            return True
+        if self._get("plugin_status.pyscf.success") is True:
+            return True
+        return False
     
     def _check_failed_geometry(self) -> Optional[str]:
         """检查 Level 2: failed_geometry"""

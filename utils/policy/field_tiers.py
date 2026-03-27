@@ -11,7 +11,6 @@ from typing import Dict, Any, List, Callable, Optional
 # 缺失任一即判定为 failed_core_features
 CORE_REQUIRED_FIELDS = [
     "molecule_info.molecule_id",
-    "molecule_info.smiles",
     "molecule_info.natm",
     "calculation_status.wavefunction_load_success",
     "global_features.dft.scf_converged",
