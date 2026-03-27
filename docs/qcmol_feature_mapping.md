@@ -1,5 +1,12 @@
 # qcMol Feature Mapping to FastORCA Schema (M5.5)
 
+This file is the detailed mapping ledger.  
+For productized usage, prefer:
+- `docs/qcmol_substitute_default.md`
+- `docs/qcmol_canonical_surface.md`
+- `docs/qcmol_consumer_guide.md`
+- `docs/qcmol_operational_checklist.md`
+
 | qcMol feature name | layer | current FastORCA status | suggested implementation source |
 |---|---|---|---|
 | qcMol ID | basic_information | implemented_exact (`molecule_info.molecule_id`) | existing code |
@@ -21,17 +28,17 @@
 | charge | global_features | implemented_exact (`molecule_info.charge`) | existing code |
 | element type | atom_features | implemented_exact (`geometry.atom_symbols`) | existing code |
 | XYZ | atom_features | implemented_exact (`geometry.atom_coords_angstrom`) | existing code |
-| NAO descriptors | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.nao_descriptors`, `needs_exact_qcmol_name`) | external/manual review (Multiwfn/NBO) |
-| LI values | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.li_values`, `needs_exact_qcmol_name`) | external/manual review |
-| ADCH charges | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.adch_charges`) | external (Multiwfn) |
+| NAO descriptors | atom_features | rejected_as_exact (archived roadmap-only placeholder: `external_bridge_roadmap.atom_level.nao_descriptors`) | external/manual review (Multiwfn/NBO) |
+| LI values | atom_features | rejected_as_exact (archived roadmap-only placeholder: `external_bridge_roadmap.atom_level.li_values`) | external/manual review |
+| ADCH charges | atom_features | rejected_as_exact (archived roadmap-only placeholder: `external_bridge_roadmap.atom_level.adch_charges`) | external (Multiwfn) |
 | NBO-LP | atom_features | implemented_proxy (`atom_features.atomic_lone_pair_heuristic_proxy`) | existing code (IBO + IAO charge heuristic) |
 | NPA | atom_features | implemented_proxy (`atom_features.atomic_charge_iao_proxy`) | existing code (IAO) |
-| NPA (exact) | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.npa_exact`) | external (NBO/Multiwfn) |
+| NPA (exact) | atom_features | rejected_as_exact (archived roadmap-only placeholder: `external_bridge_roadmap.atom_level.npa_exact`) | external (NBO/Multiwfn) |
 | stereo info | bond_features | implemented_proxy (`bond_features.bond_stereo_info`) | existing code (RDKit) |
 | DI values / DI matrix | bond_features | implemented_proxy (`bond_features.bond_delocalization_index_proxy_v1`, substitute-only frozen semantics) | existing code (Mayer/Wiberg proxy v1) |
 | ELF values | bond_features | implemented_exact (`bond_features.elf_bond_midpoint`) | existing code |
-| NBO-BD | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.nbo_bd`) | external (NBO/Multiwfn) |
-| LBO | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.lbo`) | external/manual review |
+| NBO-BD | bond_features | rejected_as_exact (archived roadmap-only placeholder: `external_bridge_roadmap.bond_level.nbo_bd`) | external (NBO/Multiwfn) |
+| LBO | bond_features | rejected_as_exact (archived roadmap-only placeholder: `external_bridge_roadmap.bond_level.lbo`) | external/manual review |
 | Mayer BL | bond_features | implemented_proxy (`bond_features.bond_orders_mayer`, qcMol-aligned substitute metadata frozen) | existing code (PySCF) |
 | optimized 3D geometry | structural_features | implemented_proxy (semantic reference to `geometry.atom_coords_angstrom` + fingerprint/natm reference) | existing code + policy |
 | most stable conformation | structural_features | implemented_proxy (RDKit ETKDG + MMFF/UFF ranking within current candidate set) | existing code (RDKit) |
@@ -39,7 +46,7 @@
 ## Notes
 
 - `needs_exact_qcmol_name` has been added in schema mapping for terms where paper abbreviation/wording must be locked before implementation.
-- Allowed status levels in this table: `implemented_exact / implemented_proxy / partial / missing`.
+- Allowed status levels in this table: `implemented_exact / implemented_proxy / partial / missing / rejected_as_exact`.
 - This file is a working contract for M5.5 naming convergence; do not rename unknown terms without paper-exact confirmation.
 
 ## B1 Proxy Fields (Open-Source)

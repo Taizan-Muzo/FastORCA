@@ -15,7 +15,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from utils.qcmol_substitute_profile import (
+    CANONICAL_SURFACE_TRAFFIC_LIGHT,
     CANONICAL_SURFACE_ITEMS,
+    CONSUMER_CAUTION_FIELDS,
+    CONSUMER_ENHANCED_FIELDS,
+    CONSUMER_MINIMAL_FIELDS,
     DISCOURAGED_DEFAULT_FIELDS,
     EXACT_ONLY_ARCHIVED_LIST,
     PROFILE_CONFIG_PATH,
@@ -96,6 +100,10 @@ def _canonical_surface_summary() -> Dict[str, Any]:
         group_map.setdefault(row["group"], []).append(row)
     return {
         "recommended_groups": group_map,
+        "consumer_minimal_fields": CONSUMER_MINIMAL_FIELDS,
+        "consumer_enhanced_fields": CONSUMER_ENHANCED_FIELDS,
+        "consumer_caution_fields": CONSUMER_CAUTION_FIELDS,
+        "traffic_light_classification": CANONICAL_SURFACE_TRAFFIC_LIGHT,
         "discouraged_default_fields": DISCOURAGED_DEFAULT_FIELDS,
     }
 
@@ -194,6 +202,7 @@ def write_markdown(report: Dict[str, Any], out_md: Path) -> None:
             "",
             "## Canonical Surface",
             "- recommended groups: basic, global, atom, bond, structural, realspace, external",
+            f"- minimal/enhanced/caution field counts: {len(report['canonical_surface']['consumer_minimal_fields'])}/{len(report['canonical_surface']['consumer_enhanced_fields'])}/{len(report['canonical_surface']['consumer_caution_fields'])}",
             "- discouraged default fields are all roadmap placeholders under external_bridge_roadmap.*",
         ]
     )

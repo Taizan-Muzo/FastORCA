@@ -15,6 +15,23 @@ python test_pipeline.py --quick
 python main.py --input test_molecules.smi --output output/ --basis 3-21g
 ```
 
+## qcMol Substitute 主线（默认交付）
+
+FastORCA 现已提供 `qcmol_substitute_default` 的稳定交付主线：
+
+- 定位：**open-source qcMol substitute**（不是 exact qcMol replica）
+- 推荐入口：`scripts/run_qcmol_substitute_default.py`
+- 推荐消费面：`docs/qcmol_canonical_surface.md`
+- 运维检查：`docs/qcmol_operational_checklist.md`
+
+文档目录（交付/消费/运维）：
+
+- 入口与配置冻结：`docs/qcmol_substitute_default.md`
+- canonical surface 冻结：`docs/qcmol_canonical_surface.md`
+- 消费指南（minimal/enhanced/caution）：`docs/qcmol_consumer_guide.md`
+- readiness 与边界说明：`docs/qcmol_substitute_readiness.md`
+- alignment master table：`docs/qcmol_alignment_master_table.md`
+
 ## 为什么选择 FastORCA？
 
 ### 🚀 速度优势：吞吐量提升 10 倍+

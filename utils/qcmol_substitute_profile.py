@@ -459,6 +459,141 @@ DISCOURAGED_DEFAULT_FIELDS: List[str] = [
 ]
 
 
+CONSUMER_MINIMAL_FIELDS: List[str] = [
+    "molecule_info.molecule_id",
+    "molecule_info.smiles",
+    "molecule_info.formula",
+    "molecule_info.charge",
+    "global_features.dft.total_energy_hartree",
+    "global_features.dft.homo_lumo_gap_hartree",
+    "global_features.dft.dipole_moment_debye",
+    "global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree",
+    "global_features.rdkit.molecular_weight",
+    "global_features.geometry_size.bounding_box_diagonal_angstrom",
+    "atom_features.atomic_charge_iao_proxy",
+    "atom_features.atomic_density_partition_charge_proxy.hirshfeld",
+    "atom_features.atomic_density_partition_charge_proxy.cm5",
+    "bond_features.bond_indices",
+    "bond_features.bond_orders_mayer",
+    "bond_features.bond_delocalization_index_proxy_v1",
+]
+
+
+CONSUMER_ENHANCED_FIELDS: List[str] = CONSUMER_MINIMAL_FIELDS + [
+    "atom_features.atomic_density_partition_charge_proxy.bader",
+    "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+    "atom_features.atomic_lone_pair_heuristic_proxy",
+    "atom_features.atomic_orbital_descriptor_proxy_v1",
+    "bond_features.bond_orbital_localization_proxy",
+    "bond_features.bond_order_weighted_localization_proxy",
+    "global_features.proxy_family_summary_v1",
+    "global_features.basin_proxy_summary_v1",
+    "structural_features.most_stable_conformation.candidate_set_statistics_proxy_v1",
+    "realspace_features.density_isosurface_area",
+    "realspace_features.density_isosurface_volume",
+    "realspace_features.density_sphericity_like",
+    "realspace_features.orbital_extent_homo",
+    "realspace_features.orbital_extent_lumo",
+    "external_bridge.critic2",
+]
+
+
+CONSUMER_CAUTION_FIELDS: List[str] = [
+    "atom_features.atomic_density_partition_volume_proxy.bader",
+    "external_features.critic2.qtaim.bader_volumes",
+    "external_bridge_roadmap.atom_level.nao_descriptors",
+    "external_bridge_roadmap.atom_level.li_values",
+    "external_bridge_roadmap.atom_level.adch_charges",
+    "external_bridge_roadmap.atom_level.npa_exact",
+    "external_bridge_roadmap.bond_level.nbo_bd",
+    "external_bridge_roadmap.bond_level.lbo",
+]
+
+
+CANONICAL_SURFACE_TRAFFIC_LIGHT: List[Dict[str, Any]] = [
+    {
+        "path": "molecule_info.molecule_id",
+        "status": "implemented_exact",
+        "tier": "green",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Primary identity field.",
+    },
+    {
+        "path": "molecule_info.smiles",
+        "status": "implemented_exact",
+        "tier": "green",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Canonical structure string for most downstream joins.",
+    },
+    {
+        "path": "global_features.dft.homo_lumo_gap_hartree",
+        "status": "implemented_exact",
+        "tier": "green",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Core electronic scalar.",
+    },
+    {
+        "path": "global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree",
+        "status": "implemented_proxy",
+        "tier": "yellow",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Frozen substitute semantics (Koopmans-style proxy).",
+    },
+    {
+        "path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
+        "status": "implemented_proxy",
+        "tier": "yellow",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Frozen substitute size definition.",
+    },
+    {
+        "path": "atom_features.atomic_density_partition_charge_proxy.bader",
+        "status": "implemented_proxy",
+        "tier": "yellow",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Validation-gated; good coverage under default profile.",
+    },
+    {
+        "path": "atom_features.atomic_density_partition_volume_proxy.bader",
+        "status": "partial",
+        "tier": "red",
+        "stability": "caution",
+        "recommended_default_dependency": False,
+        "notes": "Known upstream critic2 limitation (volume column often missing).",
+    },
+    {
+        "path": "bond_features.bond_orders_mayer",
+        "status": "implemented_proxy",
+        "tier": "yellow",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Frozen substitute for qcMol Mayer_BL semantics.",
+    },
+    {
+        "path": "structural_features.optimized_3d_geometry",
+        "status": "implemented_proxy",
+        "tier": "yellow",
+        "stability": "stable",
+        "recommended_default_dependency": True,
+        "notes": "Reference-only geometry contract to canonical geometry block.",
+    },
+    {
+        "path": "external_bridge_roadmap.atom_level.nao_descriptors",
+        "status": "rejected_as_exact",
+        "tier": "red",
+        "stability": "optional",
+        "recommended_default_dependency": False,
+        "notes": "Exact-only archived family.",
+    },
+]
+
+
 EXACT_ONLY_ARCHIVED_LIST: List[Dict[str, str]] = [
     {
         "qcMol_item_name": "NAO_descriptors",

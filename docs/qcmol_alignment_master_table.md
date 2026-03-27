@@ -53,3 +53,12 @@ python scripts/qcmol_alignment_closure_validation.py \
   --output-json <report.json> \
   --output-md <report.md>
 ```
+
+## Productization Note
+
+For operational pass/fail gating, combine this report with:
+
+- `scripts/qcmol_operational_health_check.py`
+- `docs/qcmol_operational_checklist.md`
+
+This keeps runtime health checks, master-table counts, and partial-tail explanations in one operator path.
