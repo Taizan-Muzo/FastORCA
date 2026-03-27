@@ -191,18 +191,26 @@ class UnifiedOutputBuilder:
                     "definition_version": "v1",
                     "is_proxy": True,
                     "bader_population_dispersion_proxy": None,
+                    "bader_population_entropy_proxy_v1": None,
+                    "hetero_basin_population_share_proxy_v1": None,
                     "hetero_bader_charge_extrema_proxy": None,
                     "bader_laplacian_extrema_proxy": None,
                     "bader_laplacian_dispersion_proxy": None,
+                    "bader_laplacian_sign_balance_proxy_v1": None,
+                    "bader_charge_laplacian_correlation_proxy_v1": None,
                     "atomwise_basin_companion_summary_proxy_v1": None,
                     "metadata": {
                         "candidate_set_scope": "single_optimized_geometry_current_run",
                         "status": "not_attempted",
                         "status_reason": "not_computed_yet",
                         "bader_population_dispersion_proxy_formula": "std(external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e)",
+                        "bader_population_entropy_proxy_v1_formula": "normalized_shannon_entropy(population_e / sum(population_e))",
+                        "hetero_basin_population_share_proxy_v1_formula": "sum(population_e on non C/H atoms) / sum(population_e)",
                         "hetero_bader_charge_extrema_proxy_formula": "extrema over non C/H atoms in atom_features.atomic_density_partition_charge_proxy.bader",
                         "bader_laplacian_extrema_proxy_formula": "min/max/mean/std over atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
                         "bader_laplacian_dispersion_proxy_formula": "std(atom_features.atomic_density_partition_laplacian_proxy_v1.bader)",
+                        "bader_laplacian_sign_balance_proxy_v1_formula": "(n_pos - n_neg) / n over atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                        "bader_charge_laplacian_correlation_proxy_v1_formula": "pearson_corr(bader_charge, bader_laplacian) when both vectors are valid",
                         "atomwise_basin_companion_summary_proxy_v1_formula": "compact atomwise summary over validated bader charge / population / laplacian vectors",
                         "candidate_assessment_v1": {},
                         "limitations": [
@@ -226,6 +234,9 @@ class UnifiedOutputBuilder:
                     "conformer_sensitivity_proxy_v1": None,
                     "electronic_compactness_proxy_v1": None,
                     "lone_pair_driven_polarity_proxy_v1": None,
+                    "reactivity_concentration_proxy_v1": None,
+                    "bond_pattern_heterogeneity_proxy_v1": None,
+                    "lp_environment_polarization_proxy_v1": None,
                     "metadata": {
                         "candidate_set_scope": "single_optimized_geometry_current_run",
                         "status": "not_attempted",
@@ -241,6 +252,9 @@ class UnifiedOutputBuilder:
                         "conformer_sensitivity_proxy_v1_formula": "weighted blend of normalized energy-span and geometry-span proxies from candidate_set_statistics_proxy_v1",
                         "electronic_compactness_proxy_v1_formula": "expected_electrons / realspace_features.density_isosurface_volume.value_angstrom3",
                         "lone_pair_driven_polarity_proxy_v1_formula": "mean(atomic_lone_pair_heuristic_proxy_i * abs(charge_ref_i))",
+                        "reactivity_concentration_proxy_v1_formula": "sum(top3 atomic_local_reactivity_refined_proxy_v1) / sum(all atomic_local_reactivity_refined_proxy_v1)",
+                        "bond_pattern_heterogeneity_proxy_v1_formula": "std(bond_features.bond_strength_pattern_proxy_v1)",
+                        "lp_environment_polarization_proxy_v1_formula": "mean(lone_pair_environment_proxy_v1_i * abs(charge_ref_i))",
                         "limitations": [
                             "proxy summaries aggregate existing proxy vectors",
                             "not equivalent to exact qcMol external descriptors"
@@ -370,7 +384,9 @@ class UnifiedOutputBuilder:
                 },
                 "atomic_charge_laplacian_coupling_proxy_v1": None,
                 "atomic_local_reactivity_proxy_v1": None,
+                "atomic_local_reactivity_refined_proxy_v1": None,
                 "lone_pair_environment_proxy_v1": None,
+                "lone_pair_polarization_proxy_v1": None,
                 "atomic_lone_pair_heuristic_proxy": None,
                 "atomic_orbital_descriptor_proxy_v1": {
                     "n_dominant_ibo": None,
@@ -489,6 +505,25 @@ class UnifiedOutputBuilder:
                             "depends on critic2 Lap-like integral and chosen charge proxy"
                         ],
                     },
+                    "atomic_local_reactivity_refined_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "minmax_over_atoms(0.60*atomic_local_reactivity_proxy_v1 + 0.25*abs(atomic_charge_laplacian_coupling_proxy_v1) + 0.15*lone_pair_environment_proxy_v1)",
+                        "inputs_used": [
+                            "atomic_local_reactivity_proxy_v1",
+                            "atomic_charge_laplacian_coupling_proxy_v1",
+                            "lone_pair_environment_proxy_v1"
+                        ],
+                        "range": "[0, 1]",
+                        "limitations": [
+                            "heuristic refinement over proxy components; not an exact local reactivity observable"
+                        ],
+                    },
                     "lone_pair_environment_proxy_v1": {
                         "definition_version": "v1",
                         "is_proxy": True,
@@ -507,6 +542,27 @@ class UnifiedOutputBuilder:
                         "limitations": [
                             "depends on orbital-derived lone pair proxy availability",
                             "zero for atoms without incident bonds in current topology"
+                        ],
+                    },
+                    "lone_pair_polarization_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "atomic_lone_pair_heuristic_proxy_i * abs(charge_ref_i)",
+                        "charge_source_priority": [
+                            "atomic_density_partition_charge_proxy.bader",
+                            "atomic_charge_iao_proxy",
+                            "charge_hirshfeld"
+                        ],
+                        "charge_source": None,
+                        "range": "[0, +inf)",
+                        "limitations": [
+                            "depends on lone pair heuristic proxy availability",
+                            "charge_ref source may fallback when bader is unavailable"
                         ],
                     },
                     "atomic_lone_pair_heuristic_proxy": {
@@ -576,6 +632,8 @@ class UnifiedOutputBuilder:
                 "bond_delocalization_localization_balance_proxy_v1": None,
                 "bond_elf_deloc_coupling_proxy_v1": None,
                 "bond_strength_pattern_proxy_v1": None,
+                "bond_localization_tension_proxy_v1": None,
+                "bond_polarized_delocalization_proxy_v1": None,
                 "metadata": {
                     "bond_stereo_info": {
                         "available": False,
@@ -700,6 +758,40 @@ class UnifiedOutputBuilder:
                         ],
                         "limitations": [
                             "heuristic composite proxy, not an exact quantum bond strength observable"
+                        ],
+                    },
+                    "bond_localization_tension_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "abs(bond_delocalization_localization_balance_proxy_v1)",
+                        "inputs_used": [
+                            "bond_delocalization_localization_balance_proxy_v1"
+                        ],
+                        "range": "[0, 1]",
+                        "limitations": [
+                            "captures imbalance magnitude only; sign information is in balance proxy"
+                        ],
+                    },
+                    "bond_polarized_delocalization_proxy_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": True,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "skip_reason": None,
+                        "failure_reason": None,
+                        "formula": "bond_covalency_polarity_proxy_v1 * max(0,bond_delocalization_index_proxy_v1)",
+                        "inputs_used": [
+                            "bond_covalency_polarity_proxy_v1",
+                            "bond_delocalization_index_proxy_v1"
+                        ],
+                        "limitations": [
+                            "heuristic coupling between bond polarity and delocalization tendencies"
                         ],
                     },
                 }

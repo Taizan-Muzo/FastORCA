@@ -17,52 +17,383 @@ PROFILE_ID = "qcmol_substitute_default"
 PROFILE_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / f"{PROFILE_ID}.json"
 
 
-QCMOL_ALIGNMENT_ITEMS: List[Dict[str, Any]] = [
+QCMOL_ALIGNMENT_MASTER_TABLE: List[Dict[str, Any]] = [
     # basic_information
-    {"section": "basic_information", "name": "qcMol_ID", "mapped_path": "molecule_info.molecule_id", "status": "implemented_exact"},
-    {"section": "basic_information", "name": "IUPAC_name", "mapped_path": None, "status": "missing"},
-    {"section": "basic_information", "name": "SMILES", "mapped_path": "molecule_info.smiles", "status": "implemented_exact"},
-    {"section": "basic_information", "name": "InChI", "mapped_path": "molecule_info.inchi", "status": "implemented_exact"},
-    {"section": "basic_information", "name": "InChIKey", "mapped_path": "molecule_info.inchikey", "status": "implemented_exact"},
-    {"section": "basic_information", "name": "chemical_formula", "mapped_path": "molecule_info.formula", "status": "implemented_exact"},
-    {"section": "basic_information", "name": "SMART", "mapped_path": "molecule_info.smarts", "status": "implemented_proxy"},
-    {"section": "basic_information", "name": "nickname_or_synonyms", "mapped_path": None, "status": "missing"},
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "qcMol_ID",
+        "mapped_path": "molecule_info.molecule_id",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Regression remains green and mapping path stays stable.",
+        "notes": "Canonical ID mapping is stable.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "IUPAC_name",
+        "mapped_path": None,
+        "current_status": "missing",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Reliable open-source naming resolver integrated with deterministic fallback.",
+        "notes": "Not blocking substitute default; requires external naming source.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "SMILES",
+        "mapped_path": "molecule_info.smiles",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "SMILES roundtrip coverage remains stable.",
+        "notes": "Stable canonical path.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "InChI",
+        "mapped_path": "molecule_info.inchi",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "InChI generation remains deterministic for supported molecules.",
+        "notes": "Stable canonical path.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "InChIKey",
+        "mapped_path": "molecule_info.inchikey",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "InChIKey generation remains deterministic.",
+        "notes": "Stable canonical path.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "chemical_formula",
+        "mapped_path": "molecule_info.formula",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Formula consistency checks stay green.",
+        "notes": "Stable canonical path.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "SMART",
+        "mapped_path": "molecule_info.smarts",
+        "current_status": "implemented_proxy",
+        "next_action": "redefine",
+        "completion_criterion": "qcMol exact SMART naming/semantics frozen; mapping renamed/aligned accordingly.",
+        "notes": "Current output is RDKit canonical SMARTS proxy.",
+    },
+    {
+        "section": "basic_information",
+        "qcMol_item_name": "nickname_or_synonyms",
+        "mapped_path": None,
+        "current_status": "missing",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Trusted synonym source integrated with deterministic cache policy.",
+        "notes": "Optional metadata; not a substitute-blocking gap.",
+    },
     # global_features
-    {"section": "global_features", "name": "HOMO_LUMO_gap", "mapped_path": "global_features.dft.homo_lumo_gap_hartree", "status": "implemented_exact"},
-    {"section": "global_features", "name": "dipole_moment", "mapped_path": "global_features.dft.dipole_moment_debye", "status": "implemented_exact"},
-    {"section": "global_features", "name": "isosurface_area", "mapped_path": "realspace_features.density_isosurface_area", "status": "implemented_exact"},
-    {"section": "global_features", "name": "isosurface_volume", "mapped_path": "realspace_features.density_isosurface_volume", "status": "implemented_exact"},
-    {"section": "global_features", "name": "sphericity_parameters", "mapped_path": "realspace_features.density_sphericity_like", "status": "implemented_proxy"},
-    {"section": "global_features", "name": "molecule_size", "mapped_path": "global_features.geometry_size.bounding_box_diagonal_angstrom", "status": "implemented_proxy"},
-    {"section": "global_features", "name": "molecular_weight", "mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented_exact"},
-    {"section": "global_features", "name": "ionization_affinity_or_related", "mapped_path": "global_features.dft.homo_energy_hartree", "status": "partial"},
-    {"section": "global_features", "name": "charge", "mapped_path": "molecule_info.charge", "status": "implemented_exact"},
+    {
+        "section": "global_features",
+        "qcMol_item_name": "HOMO_LUMO_gap",
+        "mapped_path": "global_features.dft.homo_lumo_gap_hartree",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Path and unit remain frozen.",
+        "notes": "Exact within current DFT stack.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "dipole_moment",
+        "mapped_path": "global_features.dft.dipole_moment_debye",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Path and unit remain frozen.",
+        "notes": "Exact within current DFT stack.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "isosurface_area",
+        "mapped_path": "realspace_features.density_isosurface_area",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Realspace extraction success remains high and definition stable.",
+        "notes": "Uses frozen realspace definition v2.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "isosurface_volume",
+        "mapped_path": "realspace_features.density_isosurface_volume",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Realspace extraction success remains high and definition stable.",
+        "notes": "Uses frozen realspace definition v2.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "sphericity_parameters",
+        "mapped_path": "realspace_features.density_sphericity_like",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Proxy formula/version unchanged and documented.",
+        "notes": "Explicitly proxy, not paper-exact sphericity.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "molecule_size",
+        "mapped_path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
+        "current_status": "implemented_proxy",
+        "next_action": "redefine",
+        "completion_criterion": "If qcMol exact size definition is frozen, add aligned exact field or alias.",
+        "notes": "Current substitute definition is geometry bounding-box diagonal.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "molecular_weight",
+        "mapped_path": "global_features.rdkit.molecular_weight",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Stable path/unit and parser consistency.",
+        "notes": "RDKit molecular weight is stable.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "ionization_affinity_or_related",
+        "mapped_path": "global_features.dft.homo_energy_hartree",
+        "current_status": "partial",
+        "next_action": "redefine",
+        "completion_criterion": "qcMol target semantics frozen and mapped to dedicated field (exact/proxy).",
+        "notes": "Current mapping is related HOMO quantity, not exact target.",
+    },
+    {
+        "section": "global_features",
+        "qcMol_item_name": "charge",
+        "mapped_path": "molecule_info.charge",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Charge consistency checks remain green.",
+        "notes": "Stable canonical path.",
+    },
     # atom_features
-    {"section": "atom_features", "name": "element_type", "mapped_path": "geometry.atom_symbols", "status": "implemented_exact"},
-    {"section": "atom_features", "name": "XYZ", "mapped_path": "geometry.atom_coords_angstrom", "status": "implemented_exact"},
-    {"section": "atom_features", "name": "NAO_descriptors", "mapped_path": "external_bridge_roadmap.atom_level.nao_descriptors", "status": "missing"},
-    {"section": "atom_features", "name": "LI_values", "mapped_path": "external_bridge_roadmap.atom_level.li_values", "status": "missing"},
-    {"section": "atom_features", "name": "ADCH_charges", "mapped_path": "external_bridge_roadmap.atom_level.adch_charges", "status": "missing"},
-    {"section": "atom_features", "name": "NBO_LP", "mapped_path": "atom_features.atomic_lone_pair_heuristic_proxy", "status": "implemented_proxy"},
-    {"section": "atom_features", "name": "NPA", "mapped_path": "atom_features.atomic_charge_iao_proxy", "status": "implemented_proxy"},
-    {"section": "atom_features", "name": "NPA_exact", "mapped_path": "external_bridge_roadmap.atom_level.npa_exact", "status": "missing"},
-    {"section": "atom_features", "name": "density_partition_charge_proxy.hirshfeld", "mapped_path": "atom_features.atomic_density_partition_charge_proxy.hirshfeld", "status": "implemented_proxy"},
-    {"section": "atom_features", "name": "density_partition_charge_proxy.cm5", "mapped_path": "atom_features.atomic_density_partition_charge_proxy.cm5", "status": "implemented_proxy"},
-    {"section": "atom_features", "name": "density_partition_charge_proxy.bader", "mapped_path": "atom_features.atomic_density_partition_charge_proxy.bader", "status": "implemented_proxy"},
-    {"section": "atom_features", "name": "density_partition_volume_proxy.bader", "mapped_path": "atom_features.atomic_density_partition_volume_proxy.bader", "status": "partial"},
-    {"section": "atom_features", "name": "atomic_orbital_descriptor_proxy_v1", "mapped_path": "atom_features.atomic_orbital_descriptor_proxy_v1", "status": "implemented_proxy"},
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "element_type",
+        "mapped_path": "geometry.atom_symbols",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Atom ordering/alignment remains stable.",
+        "notes": "Exact path.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "XYZ",
+        "mapped_path": "geometry.atom_coords_angstrom",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "Coordinate/unit convention remains frozen.",
+        "notes": "Exact path.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "NAO_descriptors",
+        "mapped_path": "external_bridge_roadmap.atom_level.nao_descriptors",
+        "current_status": "rejected_as_exact",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Open-source equivalent definition accepted or external exact route explicitly enabled.",
+        "notes": "Exact NAO requires routes outside current open-source substitute constraints.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "LI_values",
+        "mapped_path": "external_bridge_roadmap.atom_level.li_values",
+        "current_status": "rejected_as_exact",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Exact LI semantics + implementation path agreed and validated.",
+        "notes": "Kept as roadmap placeholder under current constraints.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "ADCH_charges",
+        "mapped_path": "external_bridge_roadmap.atom_level.adch_charges",
+        "current_status": "rejected_as_exact",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Exact ADCH route integrated with stable dependency policy.",
+        "notes": "Out of scope for current no-Multiwfn mainline.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "NBO_LP",
+        "mapped_path": "atom_features.atomic_lone_pair_heuristic_proxy",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Availability semantics remain stable and documented as heuristic.",
+        "notes": "Explicitly not equivalent to exact NBO-LP.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "NPA",
+        "mapped_path": "atom_features.atomic_charge_iao_proxy",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Proxy metadata and source remain stable.",
+        "notes": "IAO proxy retained as open-source substitute.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "NPA_exact",
+        "mapped_path": "external_bridge_roadmap.atom_level.npa_exact",
+        "current_status": "rejected_as_exact",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Exact NPA route and licensing/dependency policy approved.",
+        "notes": "Exact NPA unavailable in current open-source-only constraints.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "density_partition_charge_proxy.hirshfeld",
+        "mapped_path": "atom_features.atomic_density_partition_charge_proxy.hirshfeld",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Stable extraction and metadata semantics.",
+        "notes": "Open-source density-partition companion.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "density_partition_charge_proxy.cm5",
+        "mapped_path": "atom_features.atomic_density_partition_charge_proxy.cm5",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Stable extraction and metadata semantics.",
+        "notes": "Open-source density-partition companion.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "density_partition_charge_proxy.bader",
+        "mapped_path": "atom_features.atomic_density_partition_charge_proxy.bader",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Validated writeback rate remains >= 0.80 on default validation set.",
+        "notes": "Current validated writeback ~0.90 with retry rescue path.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "density_partition_volume_proxy.bader",
+        "mapped_path": "atom_features.atomic_density_partition_volume_proxy.bader",
+        "current_status": "partial",
+        "next_action": "upgrade",
+        "completion_criterion": "Stable numeric volume column availability with robust validation on representative batches.",
+        "notes": "Current critic2 outputs often omit/unstably report usable volume column.",
+    },
+    {
+        "section": "atom_features",
+        "qcMol_item_name": "atomic_orbital_descriptor_proxy_v1",
+        "mapped_path": "atom_features.atomic_orbital_descriptor_proxy_v1",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Orbital availability semantics and fixed-shape validation remain stable.",
+        "notes": "Proxy descriptor family retained for open-source route.",
+    },
     # bond_features
-    {"section": "bond_features", "name": "stereo_info", "mapped_path": "bond_features.bond_stereo_info", "status": "implemented_proxy"},
-    {"section": "bond_features", "name": "DI_values_or_matrix", "mapped_path": "bond_features.bond_delocalization_index_proxy_v1", "status": "implemented_proxy"},
-    {"section": "bond_features", "name": "ELF_values", "mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented_exact"},
-    {"section": "bond_features", "name": "NBO_BD", "mapped_path": "external_bridge_roadmap.bond_level.nbo_bd", "status": "missing"},
-    {"section": "bond_features", "name": "LBO", "mapped_path": "external_bridge_roadmap.bond_level.lbo", "status": "missing"},
-    {"section": "bond_features", "name": "Mayer_BL", "mapped_path": "bond_features.bond_orders_mayer", "status": "partial"},
-    {"section": "bond_features", "name": "bond_orbital_localization_proxy", "mapped_path": "bond_features.bond_orbital_localization_proxy", "status": "implemented_proxy"},
-    {"section": "bond_features", "name": "bond_order_weighted_localization_proxy", "mapped_path": "bond_features.bond_order_weighted_localization_proxy", "status": "implemented_proxy"},
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "stereo_info",
+        "mapped_path": "bond_features.bond_stereo_info",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Enum and mapping semantics remain stable.",
+        "notes": "RDKit perception proxy.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "DI_values_or_matrix",
+        "mapped_path": "bond_features.bond_delocalization_index_proxy_v1",
+        "current_status": "implemented_proxy",
+        "next_action": "redefine",
+        "completion_criterion": "Exact DI route is available or proxy naming finalized as substitute-only.",
+        "notes": "Current DI is Mayer/Wiberg-derived proxy, not exact DI matrix.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "ELF_values",
+        "mapped_path": "bond_features.elf_bond_midpoint",
+        "current_status": "implemented_exact",
+        "next_action": "keep",
+        "completion_criterion": "ELF extraction/alignment checks remain stable.",
+        "notes": "Exact within current extraction definition.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "NBO_BD",
+        "mapped_path": "external_bridge_roadmap.bond_level.nbo_bd",
+        "current_status": "rejected_as_exact",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Exact NBO BD route explicitly enabled and validated.",
+        "notes": "Unavailable under no-NBO constraint.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "LBO",
+        "mapped_path": "external_bridge_roadmap.bond_level.lbo",
+        "current_status": "rejected_as_exact",
+        "next_action": "roadmap_only",
+        "completion_criterion": "Exact LBO route explicitly enabled and validated.",
+        "notes": "Unavailable under no-Multiwfn/NBO constraint.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "Mayer_BL",
+        "mapped_path": "bond_features.bond_orders_mayer",
+        "current_status": "partial",
+        "next_action": "upgrade",
+        "completion_criterion": "Terminology and numeric interpretation aligned with qcMol Mayer_BL semantics.",
+        "notes": "Value exists but semantic/name alignment still partial.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "bond_orbital_localization_proxy",
+        "mapped_path": "bond_features.bond_orbital_localization_proxy",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Availability semantics and shape validation remain stable.",
+        "notes": "IBO-derived localization proxy.",
+    },
+    {
+        "section": "bond_features",
+        "qcMol_item_name": "bond_order_weighted_localization_proxy",
+        "mapped_path": "bond_features.bond_order_weighted_localization_proxy",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Availability semantics and shape validation remain stable.",
+        "notes": "Composite proxy from localization and DI proxy.",
+    },
     # structural_features
-    {"section": "structural_features", "name": "optimized_3D_geometry", "mapped_path": "structural_features.optimized_3d_geometry", "status": "partial"},
-    {"section": "structural_features", "name": "most_stable_conformation", "mapped_path": "structural_features.most_stable_conformation", "status": "implemented_proxy"},
+    {
+        "section": "structural_features",
+        "qcMol_item_name": "optimized_3D_geometry",
+        "mapped_path": "structural_features.optimized_3d_geometry",
+        "current_status": "partial",
+        "next_action": "upgrade",
+        "completion_criterion": "If required by downstream, provide optional explicit coordinate block while keeping semantic reference.",
+        "notes": "Current representation is semantic reference to geometry block.",
+    },
+    {
+        "section": "structural_features",
+        "qcMol_item_name": "most_stable_conformation",
+        "mapped_path": "structural_features.most_stable_conformation",
+        "current_status": "implemented_proxy",
+        "next_action": "keep",
+        "completion_criterion": "Candidate-set metadata and reproducibility fields stay stable.",
+        "notes": "Proxy scope is candidate-set minimum, not global minimum proof.",
+    },
+]
+
+
+QCMOL_ALIGNMENT_ITEMS: List[Dict[str, Any]] = [
+    {
+        "section": row["section"],
+        "name": row["qcMol_item_name"],
+        "mapped_path": row["mapped_path"],
+        "status": row["current_status"],
+    }
+    for row in QCMOL_ALIGNMENT_MASTER_TABLE
 ]
 
 
@@ -183,11 +514,41 @@ def apply_bader_validation_profile(feature_extractor: Any, profile: Dict[str, An
 
 
 def summarize_alignment_status_counts(items: List[Dict[str, Any]] | None = None) -> Dict[str, int]:
-    """Return counts of implemented_exact/proxy/partial/missing from alignment table."""
+    """Return counts by status from alignment table."""
     rows = items if items is not None else QCMOL_ALIGNMENT_ITEMS
-    out = {"implemented_exact": 0, "implemented_proxy": 0, "partial": 0, "missing": 0}
+    out = {
+        "implemented_exact": 0,
+        "implemented_proxy": 0,
+        "partial": 0,
+        "missing": 0,
+        "rejected_as_exact": 0,
+    }
     for row in rows:
-        status = str(row.get("status", "")).strip()
+        status = str(row.get("status", row.get("current_status", ""))).strip()
         if status in out:
             out[status] += 1
+    return out
+
+
+def summarize_alignment_next_actions(master_table: List[Dict[str, Any]] | None = None) -> Dict[str, int]:
+    """Count next_action values in master table."""
+    rows = master_table if master_table is not None else QCMOL_ALIGNMENT_MASTER_TABLE
+    out = {"keep": 0, "upgrade": 0, "redefine": 0, "roadmap_only": 0, "reject": 0}
+    for row in rows:
+        action = str(row.get("next_action", "")).strip()
+        if action in out:
+            out[action] += 1
+    return out
+
+
+def remaining_alignment_gaps(master_table: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
+    """Return rows that are not yet implemented_exact/implemented_proxy keep-state."""
+    rows = master_table if master_table is not None else QCMOL_ALIGNMENT_MASTER_TABLE
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        status = str(row.get("current_status", "")).strip()
+        action = str(row.get("next_action", "")).strip()
+        if status in {"implemented_exact", "implemented_proxy"} and action == "keep":
+            continue
+        out.append(row)
     return out

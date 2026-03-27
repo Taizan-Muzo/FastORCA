@@ -281,3 +281,23 @@ Frozen formulas/constraints:
   - `len(bond_stereo_info) == len(bond_indices)` must hold.
   - Each element corresponds to the same bond at the same index in `bond_indices`.
   - Allowed enum values: `none | any | cis | trans | e | z | unknown`.
+
+## qcMol Alignment Closure Sprint 1 (v3)
+
+- Alignment master table is now frozen in:
+  - `utils/qcmol_substitute_profile.py::QCMOL_ALIGNMENT_MASTER_TABLE`
+  - `docs/qcmol_alignment_master_table.md`
+- Basin-family closure additions:
+  - `global_features.basin_proxy_summary_v1.bader_population_entropy_proxy_v1`
+  - `global_features.basin_proxy_summary_v1.hetero_basin_population_share_proxy_v1`
+  - `global_features.basin_proxy_summary_v1.bader_laplacian_sign_balance_proxy_v1`
+  - `global_features.basin_proxy_summary_v1.bader_charge_laplacian_correlation_proxy_v1`
+- Atom/Bond localized closure additions:
+  - `atom_features.atomic_local_reactivity_refined_proxy_v1`
+  - `atom_features.lone_pair_polarization_proxy_v1`
+  - `bond_features.bond_localization_tension_proxy_v1`
+  - `bond_features.bond_polarized_delocalization_proxy_v1`
+- Molecule-level closure summary additions:
+  - `global_features.proxy_family_summary_v1.reactivity_concentration_proxy_v1`
+  - `global_features.proxy_family_summary_v1.bond_pattern_heterogeneity_proxy_v1`
+  - `global_features.proxy_family_summary_v1.lp_environment_polarization_proxy_v1`

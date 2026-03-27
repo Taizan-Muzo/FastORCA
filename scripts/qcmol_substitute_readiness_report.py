@@ -18,9 +18,12 @@ from utils.qcmol_substitute_profile import (
     CANONICAL_SURFACE_ITEMS,
     DISCOURAGED_DEFAULT_FIELDS,
     PROFILE_CONFIG_PATH,
+    QCMOL_ALIGNMENT_MASTER_TABLE,
     QCMOL_ALIGNMENT_ITEMS,
     load_qcmol_substitute_default_profile,
+    remaining_alignment_gaps,
     summarize_alignment_status_counts,
+    summarize_alignment_next_actions,
 )
 
 
@@ -74,11 +77,15 @@ def _extract_bader_metrics(finalmile: Dict[str, Any], uplift_baseline: Dict[str,
 def _split_alignment_rows() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     deliverable = []
     roadmap = []
-    for row in QCMOL_ALIGNMENT_ITEMS:
-        if row["status"] == "missing":
+    for row in QCMOL_ALIGNMENT_MASTER_TABLE:
+        status = row["current_status"]
+        action = row["next_action"]
+        if status in {"missing", "rejected_as_exact"} or action in {"roadmap_only", "reject"}:
             roadmap.append(row)
-        else:
+        elif status in {"implemented_exact", "implemented_proxy"} and action == "keep":
             deliverable.append(row)
+        else:
+            roadmap.append(row)
     return deliverable, roadmap
 
 
@@ -127,7 +134,9 @@ def _build_readiness_judgement(main_metrics: Dict[str, Any], bader_metrics: Dict
 
 
 def build_report(validation: Dict[str, Any], finalmile: Dict[str, Any], uplift_baseline: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
-    status_counts = summarize_alignment_status_counts()
+    status_counts = summarize_alignment_status_counts(QCMOL_ALIGNMENT_ITEMS)
+    next_action_counts = summarize_alignment_next_actions(QCMOL_ALIGNMENT_MASTER_TABLE)
+    gaps = remaining_alignment_gaps(QCMOL_ALIGNMENT_MASTER_TABLE)
     deliverable_rows, roadmap_rows = _split_alignment_rows()
     main_metrics = _extract_main_validation_metrics(validation)
     bader_metrics = _extract_bader_metrics(finalmile, uplift_baseline)
@@ -141,11 +150,15 @@ def build_report(validation: Dict[str, Any], finalmile: Dict[str, Any], uplift_b
         },
         "coverage_snapshot": {
             "alignment_status_counts": status_counts,
+            "alignment_next_action_counts": next_action_counts,
+            "remaining_gap_count": len(gaps),
             "main_validation": main_metrics,
             "bader_finalmile": bader_metrics,
         },
+        "alignment_master_table": QCMOL_ALIGNMENT_MASTER_TABLE,
         "default_deliverable_alignment_items": deliverable_rows,
         "roadmap_placeholder_alignment_items": roadmap_rows,
+        "remaining_alignment_gaps": gaps,
         "canonical_surface": _canonical_surface_summary(),
         "readiness_judgement": judgement,
     }
@@ -162,7 +175,7 @@ def write_markdown(report: Dict[str, Any], out_md: Path) -> None:
         "# qcMol Substitute Readiness Report",
         "",
         "## Coverage Snapshot",
-        f"- alignment counts: exact={counts['implemented_exact']}, proxy={counts['implemented_proxy']}, partial={counts['partial']}, missing={counts['missing']}",
+        f"- alignment counts: exact={counts['implemented_exact']}, proxy={counts['implemented_proxy']}, partial={counts['partial']}, missing={counts['missing']}, rejected_as_exact={counts['rejected_as_exact']}",
         f"- main batch fully_success_ratio: {main_v.get('fully_success_ratio')}",
         f"- critic2 execution success rate: {bader.get('critic2_execution_success_rate')}",
         f"- bader charge validated writeback rate: {bader.get('bader_charge_writeback_rate')}",

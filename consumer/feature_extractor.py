@@ -2066,6 +2066,9 @@ class FeatureExtractor:
             "conformer_sensitivity_proxy_v1": None,
             "electronic_compactness_proxy_v1": None,
             "lone_pair_driven_polarity_proxy_v1": None,
+            "reactivity_concentration_proxy_v1": None,
+            "bond_pattern_heterogeneity_proxy_v1": None,
+            "lp_environment_polarization_proxy_v1": None,
             "metadata": {
                 "candidate_set_scope": "single_optimized_geometry_current_run",
                 "status": "unavailable",
@@ -2081,6 +2084,9 @@ class FeatureExtractor:
                 "conformer_sensitivity_proxy_v1_formula": "weighted blend of normalized energy-span and geometry-span proxies from candidate_set_statistics_proxy_v1",
                 "electronic_compactness_proxy_v1_formula": "expected_electrons / realspace_features.density_isosurface_volume.value_angstrom3",
                 "lone_pair_driven_polarity_proxy_v1_formula": "mean(atomic_lone_pair_heuristic_proxy_i * abs(charge_ref_i))",
+                "reactivity_concentration_proxy_v1_formula": "sum(top3 atomic_local_reactivity_refined_proxy_v1) / sum(all atomic_local_reactivity_refined_proxy_v1)",
+                "bond_pattern_heterogeneity_proxy_v1_formula": "std(bond_features.bond_strength_pattern_proxy_v1)",
+                "lp_environment_polarization_proxy_v1_formula": "mean(lone_pair_environment_proxy_v1_i * abs(charge_ref_i))",
                 "limitations": [
                     "proxy summaries aggregate existing proxy vectors",
                     "not equivalent to exact qcMol external descriptors",
@@ -2278,15 +2284,64 @@ class FeatureExtractor:
         else:
             reasons.append("lone_pair_driven_polarity_inputs_missing")
 
+        # C7: reactivity concentration (top-k concentration of refined local reactivity).
+        refined_reactivity = self._safe_numeric_list(
+            atom_feat.get("atomic_local_reactivity_refined_proxy_v1"),
+            expected_len=natm_int,
+        )
+        fallback_reactivity = self._safe_numeric_list(
+            atom_feat.get("atomic_local_reactivity_proxy_v1"),
+            expected_len=natm_int,
+        )
+        reactivity_vals = refined_reactivity if isinstance(refined_reactivity, list) else fallback_reactivity
+        if isinstance(reactivity_vals, list) and len(reactivity_vals) > 0:
+            total_reactivity = float(sum(max(0.0, float(x)) for x in reactivity_vals))
+            if total_reactivity <= 1e-12:
+                summary["reactivity_concentration_proxy_v1"] = 0.0
+            else:
+                topk = sorted((max(0.0, float(x)) for x in reactivity_vals), reverse=True)[:3]
+                summary["reactivity_concentration_proxy_v1"] = float(sum(topk) / total_reactivity)
+            computed_any = True
+            metric_count += 1
+        else:
+            reasons.append("reactivity_concentration_inputs_missing")
+
+        # C8: bond-pattern heterogeneity from strength-pattern vector.
+        bond_strength_vals = self._safe_numeric_list(
+            bond_feat.get("bond_strength_pattern_proxy_v1"),
+            expected_len=len(bond_feat.get("bond_indices") or []) if isinstance(bond_feat.get("bond_indices"), list) else None,
+        )
+        if isinstance(bond_strength_vals, list) and len(bond_strength_vals) > 0:
+            b_mean = float(sum(bond_strength_vals) / len(bond_strength_vals))
+            b_std = float(np.sqrt(np.mean([(x - b_mean) ** 2 for x in bond_strength_vals])))
+            summary["bond_pattern_heterogeneity_proxy_v1"] = b_std
+            computed_any = True
+            metric_count += 1
+        else:
+            reasons.append("bond_pattern_heterogeneity_inputs_missing")
+
+        # C9: lone-pair environment polarization.
+        lp_env_vals = self._safe_numeric_list(
+            atom_feat.get("lone_pair_environment_proxy_v1"),
+            expected_len=natm_int,
+        )
+        if isinstance(charges_ref, list) and isinstance(lp_env_vals, list) and len(charges_ref) == len(lp_env_vals) and len(lp_env_vals) > 0:
+            coupled_env = [float(lp_env_vals[i] * abs(charges_ref[i])) for i in range(len(lp_env_vals))]
+            summary["lp_environment_polarization_proxy_v1"] = float(sum(coupled_env) / len(coupled_env))
+            computed_any = True
+            metric_count += 1
+        else:
+            reasons.append("lp_environment_polarization_inputs_missing")
+
         summary["available"] = bool(computed_any)
         summary["metadata"]["charge_reference_source"] = charge_source
         summary["metadata"]["implemented_metric_count"] = int(metric_count)
-        summary["metadata"]["total_metric_count"] = 11
+        summary["metadata"]["total_metric_count"] = 14
         summary["metadata"]["input_warnings"] = reasons
         if metric_count == 0:
             summary["metadata"]["status"] = "unavailable"
             summary["metadata"]["status_reason"] = "|".join(reasons) if reasons else "proxy_inputs_missing"
-        elif metric_count >= 8:
+        elif metric_count >= 10:
             summary["metadata"]["status"] = "success"
             summary["metadata"]["status_reason"] = "ok"
         else:
@@ -2391,18 +2446,26 @@ class FeatureExtractor:
             "definition_version": "v1",
             "is_proxy": True,
             "bader_population_dispersion_proxy": None,
+            "bader_population_entropy_proxy_v1": None,
+            "hetero_basin_population_share_proxy_v1": None,
             "hetero_bader_charge_extrema_proxy": None,
             "bader_laplacian_extrema_proxy": None,
             "bader_laplacian_dispersion_proxy": None,
+            "bader_laplacian_sign_balance_proxy_v1": None,
+            "bader_charge_laplacian_correlation_proxy_v1": None,
             "atomwise_basin_companion_summary_proxy_v1": None,
             "metadata": {
                 "candidate_set_scope": "single_optimized_geometry_current_run",
                 "status": "unavailable",
                 "status_reason": "basin_inputs_missing",
                 "bader_population_dispersion_proxy_formula": "std(external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e)",
+                "bader_population_entropy_proxy_v1_formula": "normalized_shannon_entropy(population_e / sum(population_e))",
+                "hetero_basin_population_share_proxy_v1_formula": "sum(population_e on non C/H atoms) / sum(population_e)",
                 "hetero_bader_charge_extrema_proxy_formula": "extrema over non C/H atoms in atom_features.atomic_density_partition_charge_proxy.bader",
                 "bader_laplacian_extrema_proxy_formula": "min/max/mean/std over atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
                 "bader_laplacian_dispersion_proxy_formula": "std(atom_features.atomic_density_partition_laplacian_proxy_v1.bader)",
+                "bader_laplacian_sign_balance_proxy_v1_formula": "(n_pos - n_neg) / n over atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "bader_charge_laplacian_correlation_proxy_v1_formula": "pearson_corr(bader_charge, bader_laplacian) when both vectors are valid",
                 "atomwise_basin_companion_summary_proxy_v1_formula": "compact atomwise summary over validated bader charge / population / laplacian vectors",
                 "candidate_assessment_v1": {},
                 "limitations": [
@@ -2426,8 +2489,63 @@ class FeatureExtractor:
                 "non_redundant_value": "captures basin-electron distribution heterogeneity beyond per-atom raw values",
             }
             implemented += 1
+
+            total_pop = float(sum(max(0.0, float(x)) for x in bader_pop))
+            if total_pop > 1e-12:
+                probs = [max(0.0, float(x)) / total_pop for x in bader_pop]
+                if len(probs) <= 1:
+                    entropy = 0.0
+                else:
+                    entropy_raw = -sum(p * float(np.log(p)) for p in probs if p > 1e-16)
+                    entropy = float(entropy_raw / max(1e-12, float(np.log(len(probs)))))
+                summary["bader_population_entropy_proxy_v1"] = float(max(0.0, min(1.0, entropy)))
+                assess["bader_population_entropy_proxy_v1"] = {
+                    "status": "implemented",
+                    "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                    "validation_rule": "population_vector_numeric_and_total_positive",
+                    "reason": "population_vector_available",
+                    "non_redundant_value": "normalized entropy summarizes concentration-vs-spread of basin populations",
+                }
+                implemented += 1
+
+                hetero_idx = [i for i, sym in enumerate(atom_symbols) if str(sym).upper() not in {"C", "H"} and i < len(bader_pop)]
+                hetero_sum = float(sum(float(bader_pop[i]) for i in hetero_idx))
+                summary["hetero_basin_population_share_proxy_v1"] = float(hetero_sum / total_pop)
+                assess["hetero_basin_population_share_proxy_v1"] = {
+                    "status": "implemented",
+                    "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                    "validation_rule": "population_vector_numeric_and_total_positive",
+                    "reason": "hetero_subset_available" if len(hetero_idx) > 0 else "no_hetero_atoms_share_zero",
+                    "non_redundant_value": "captures hetero-atom basin electron share at molecule level",
+                }
+                implemented += 1
+            else:
+                assess["bader_population_entropy_proxy_v1"] = {
+                    "status": "partial",
+                    "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                    "validation_rule": "population_total_positive",
+                    "reason": "population_total_non_positive",
+                }
+                assess["hetero_basin_population_share_proxy_v1"] = {
+                    "status": "partial",
+                    "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                    "validation_rule": "population_total_positive",
+                    "reason": "population_total_non_positive",
+                }
         else:
             assess["bader_population_dispersion_proxy"] = {
+                "status": "partial",
+                "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "population_vector_missing_or_invalid",
+            }
+            assess["bader_population_entropy_proxy_v1"] = {
+                "status": "partial",
+                "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "population_vector_missing_or_invalid",
+            }
+            assess["hetero_basin_population_share_proxy_v1"] = {
                 "status": "partial",
                 "source": "external_features.critic2.qtaim.stable_atomic_integrated_properties_v1.population_e",
                 "validation_rule": "numeric_vector_len_equals_natm",
@@ -2476,6 +2594,9 @@ class FeatureExtractor:
             lap_stats = self._summarize_numeric_vector(bader_lap)
             summary["bader_laplacian_extrema_proxy"] = lap_stats
             summary["bader_laplacian_dispersion_proxy"] = None if lap_stats is None else lap_stats["std"]
+            n_pos = int(sum(1 for x in bader_lap if float(x) > 0.0))
+            n_neg = int(sum(1 for x in bader_lap if float(x) < 0.0))
+            summary["bader_laplacian_sign_balance_proxy_v1"] = float((n_pos - n_neg) / max(1, len(bader_lap)))
             assess["bader_laplacian_extrema_proxy"] = {
                 "status": "implemented",
                 "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
@@ -2490,7 +2611,14 @@ class FeatureExtractor:
                 "reason": "laplacian_vector_available",
                 "non_redundant_value": "compact spread metric for basin Laplacian heterogeneity",
             }
-            implemented += 2
+            assess["bader_laplacian_sign_balance_proxy_v1"] = {
+                "status": "implemented",
+                "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "laplacian_vector_available",
+                "non_redundant_value": "summarizes sign-dominance of basin Laplacian distribution",
+            }
+            implemented += 3
         else:
             assess["bader_laplacian_extrema_proxy"] = {
                 "status": "partial",
@@ -2503,6 +2631,51 @@ class FeatureExtractor:
                 "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
                 "validation_rule": "numeric_vector_len_equals_natm",
                 "reason": "laplacian_vector_missing_or_invalid",
+            }
+            assess["bader_laplacian_sign_balance_proxy_v1"] = {
+                "status": "partial",
+                "source": "atom_features.atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "numeric_vector_len_equals_natm",
+                "reason": "laplacian_vector_missing_or_invalid",
+            }
+
+        if (
+            isinstance(bader_charge, list)
+            and isinstance(bader_lap, list)
+            and len(bader_charge) == len(bader_lap)
+            and len(bader_charge) > 1
+        ):
+            c_mean = float(sum(bader_charge) / len(bader_charge))
+            l_mean = float(sum(bader_lap) / len(bader_lap))
+            c_dev = [float(x - c_mean) for x in bader_charge]
+            l_dev = [float(x - l_mean) for x in bader_lap]
+            c_std = float(np.sqrt(np.mean([x * x for x in c_dev])))
+            l_std = float(np.sqrt(np.mean([x * x for x in l_dev])))
+            if c_std > 1e-12 and l_std > 1e-12:
+                cov = float(np.mean([c_dev[i] * l_dev[i] for i in range(len(c_dev))]))
+                corr = float(np.clip(cov / (c_std * l_std), -1.0, 1.0))
+                summary["bader_charge_laplacian_correlation_proxy_v1"] = corr
+                assess["bader_charge_laplacian_correlation_proxy_v1"] = {
+                    "status": "implemented",
+                    "source": "atomic_density_partition_charge_proxy.bader + atomic_density_partition_laplacian_proxy_v1.bader",
+                    "validation_rule": "both_vectors_numeric_len_match_and_nonzero_variance",
+                    "reason": "charge_laplacian_vectors_available",
+                    "non_redundant_value": "captures cross-coupling between basin charge redistribution and Laplacian trend",
+                }
+                implemented += 1
+            else:
+                assess["bader_charge_laplacian_correlation_proxy_v1"] = {
+                    "status": "partial",
+                    "source": "atomic_density_partition_charge_proxy.bader + atomic_density_partition_laplacian_proxy_v1.bader",
+                    "validation_rule": "nonzero_variance_required",
+                    "reason": "charge_or_laplacian_zero_variance",
+                }
+        else:
+            assess["bader_charge_laplacian_correlation_proxy_v1"] = {
+                "status": "partial",
+                "source": "atomic_density_partition_charge_proxy.bader + atomic_density_partition_laplacian_proxy_v1.bader",
+                "validation_rule": "both_vectors_numeric_len_match",
+                "reason": "charge_or_laplacian_vector_missing_or_invalid",
             }
 
         companion = {
@@ -2540,7 +2713,7 @@ class FeatureExtractor:
 
         summary["metadata"]["candidate_assessment_v1"] = assess
         summary["metadata"]["implemented_candidate_count"] = int(implemented)
-        if implemented >= 4:
+        if implemented >= 7:
             summary["available"] = True
             summary["metadata"]["status"] = "success"
             summary["metadata"]["status_reason"] = "ok"
@@ -2682,6 +2855,86 @@ class FeatureExtractor:
             failure_reason=lp_env_reason if lp_env_status == "unavailable" else None,
         )
 
+        # Refined atom-level reactivity proxy (closure enhancement).
+        refined_reactivity_vals: Optional[List[float]] = None
+        refined_reactivity_status = "unavailable"
+        refined_reactivity_reason = "atomic_local_reactivity_refined_inputs_missing"
+        if isinstance(local_reactivity_vals, list) and natm_int is not None:
+            coupling_abs_norm: List[float] = [0.0] * natm_int
+            if isinstance(coupling_vals, list) and len(coupling_vals) == natm_int:
+                coupling_abs = [abs(float(x)) for x in coupling_vals]
+                c_max = max(coupling_abs) if coupling_abs else 0.0
+                if c_max > 1e-12:
+                    coupling_abs_norm = [float(x / c_max) for x in coupling_abs]
+
+            lp_env_norm: List[float] = [0.0] * natm_int
+            if isinstance(lp_env_vals, list) and len(lp_env_vals) == natm_int:
+                lp_min = float(min(lp_env_vals))
+                lp_max = float(max(lp_env_vals))
+                lp_span = float(lp_max - lp_min)
+                if lp_span > 1e-12:
+                    lp_env_norm = [float((x - lp_min) / lp_span) for x in lp_env_vals]
+
+            raw_refined = [
+                float(
+                    0.60 * float(local_reactivity_vals[i])
+                    + 0.25 * float(coupling_abs_norm[i])
+                    + 0.15 * float(lp_env_norm[i])
+                )
+                for i in range(natm_int)
+            ]
+            r_min = min(raw_refined) if raw_refined else 0.0
+            r_max = max(raw_refined) if raw_refined else 0.0
+            r_span = float(r_max - r_min)
+            if r_span <= 1e-12:
+                refined_reactivity_vals = [0.0] * natm_int
+            else:
+                refined_reactivity_vals = [float((x - r_min) / r_span) for x in raw_refined]
+            refined_reactivity_status, refined_reactivity_reason = self._assess_proxy_list_availability(
+                values=refined_reactivity_vals,
+                expected_len=natm_int,
+                field_name="atomic_local_reactivity_refined_proxy_v1",
+            )
+            if refined_reactivity_status == "success":
+                builder.set_atom_features(atomic_local_reactivity_refined_proxy_v1=refined_reactivity_vals)
+                if not isinstance(lp_env_vals, list):
+                    refined_reactivity_reason = "ok_with_lone_pair_environment_fallback_zero"
+        elif local_reactivity_status in {"skipped", "not_attempted"}:
+            refined_reactivity_status = local_reactivity_status
+            refined_reactivity_reason = f"upstream_atomic_local_reactivity_{local_reactivity_status}"
+        builder.set_atom_metadata(
+            "atomic_local_reactivity_refined_proxy_v1",
+            availability_status=refined_reactivity_status,
+            status_reason=refined_reactivity_reason,
+            skip_reason=None,
+            failure_reason=refined_reactivity_reason if refined_reactivity_status == "unavailable" else None,
+        )
+
+        # Lone-pair polarization proxy (charge-weighted lone-pair intensity).
+        lp_polarization_vals: Optional[List[float]] = None
+        lp_polarization_status = "unavailable"
+        lp_polarization_reason = "lone_pair_polarization_inputs_missing"
+        if not isinstance(lp_vals, list) and lp_upstream_status in {"skipped", "not_attempted"}:
+            lp_polarization_status = lp_upstream_status
+            lp_polarization_reason = f"upstream_lone_pair_{lp_upstream_status}"
+        if isinstance(lp_vals, list) and isinstance(charges_ref, list) and natm_int is not None and len(lp_vals) == len(charges_ref):
+            lp_polarization_vals = [float(lp_vals[i] * abs(charges_ref[i])) for i in range(natm_int)]
+            lp_polarization_status, lp_polarization_reason = self._assess_proxy_list_availability(
+                values=lp_polarization_vals,
+                expected_len=natm_int,
+                field_name="lone_pair_polarization_proxy_v1",
+            )
+            if lp_polarization_status == "success":
+                builder.set_atom_features(lone_pair_polarization_proxy_v1=lp_polarization_vals)
+        builder.set_atom_metadata(
+            "lone_pair_polarization_proxy_v1",
+            availability_status=lp_polarization_status,
+            status_reason=lp_polarization_reason,
+            skip_reason=None,
+            failure_reason=lp_polarization_reason if lp_polarization_status == "unavailable" else None,
+            charge_source=charge_source,
+        )
+
         # -------- Bond-level deepening --------
         bond_covpol_vals: Optional[List[float]] = None
         bond_covpol_status = "unavailable"
@@ -2765,6 +3018,30 @@ class FeatureExtractor:
             localization_source=loc_source if bond_balance_status == "success" else None,
         )
 
+        # Bond localization tension proxy: magnitude-only companion of balance.
+        bond_tension_vals: Optional[List[float]] = None
+        bond_tension_status = "unavailable"
+        bond_tension_reason = "bond_localization_tension_inputs_missing"
+        if isinstance(bond_balance_vals, list) and n_bonds is not None:
+            bond_tension_vals = [float(abs(x)) for x in bond_balance_vals]
+            bond_tension_status, bond_tension_reason = self._assess_proxy_list_availability(
+                values=bond_tension_vals,
+                expected_len=n_bonds,
+                field_name="bond_localization_tension_proxy_v1",
+            )
+            if bond_tension_status == "success":
+                builder.set_bond_features(bond_localization_tension_proxy_v1=bond_tension_vals)
+        elif bond_balance_status in {"skipped", "not_attempted"}:
+            bond_tension_status = bond_balance_status
+            bond_tension_reason = f"upstream_bond_balance_{bond_balance_status}"
+        builder.set_bond_metadata(
+            "bond_localization_tension_proxy_v1",
+            availability_status=bond_tension_status,
+            status_reason=bond_tension_reason,
+            skip_reason=None,
+            failure_reason=bond_tension_reason if bond_tension_status == "unavailable" else None,
+        )
+
         bond_elf_deloc_vals: Optional[List[float]] = None
         bond_elf_deloc_status = "unavailable"
         bond_elf_deloc_reason = "bond_elf_deloc_coupling_inputs_missing"
@@ -2823,10 +3100,33 @@ class FeatureExtractor:
             failure_reason=bond_strength_reason if bond_strength_status == "unavailable" else None,
         )
 
+        # Bond polarized-delocalization proxy (closure enhancement).
+        bond_pol_deloc_vals: Optional[List[float]] = None
+        bond_pol_deloc_status = "unavailable"
+        bond_pol_deloc_reason = "bond_polarized_delocalization_inputs_missing"
+        if isinstance(bond_covpol_vals, list) and isinstance(di_vals, list) and n_bonds is not None and len(bond_covpol_vals) == len(di_vals):
+            bond_pol_deloc_vals = [float(max(0.0, di_vals[i]) * bond_covpol_vals[i]) for i in range(len(di_vals))]
+            bond_pol_deloc_status, bond_pol_deloc_reason = self._assess_proxy_list_availability(
+                values=bond_pol_deloc_vals,
+                expected_len=n_bonds,
+                field_name="bond_polarized_delocalization_proxy_v1",
+            )
+            if bond_pol_deloc_status == "success":
+                builder.set_bond_features(bond_polarized_delocalization_proxy_v1=bond_pol_deloc_vals)
+        builder.set_bond_metadata(
+            "bond_polarized_delocalization_proxy_v1",
+            availability_status=bond_pol_deloc_status,
+            status_reason=bond_pol_deloc_reason,
+            skip_reason=None,
+            failure_reason=bond_pol_deloc_reason if bond_pol_deloc_status == "unavailable" else None,
+        )
+
         logger.debug(
             f"[{molecule_id}] deepening atom/bond proxies: "
-            f"atom(coupling={coupling_status},reactivity={local_reactivity_status},lp_env={lp_env_status}), "
-            f"bond(covpol={bond_covpol_status},balance={bond_balance_status},elf_deloc={bond_elf_deloc_status},strength={bond_strength_status})"
+            f"atom(coupling={coupling_status},reactivity={local_reactivity_status},reactivity_refined={refined_reactivity_status},"
+            f"lp_env={lp_env_status},lp_polar={lp_polarization_status}), "
+            f"bond(covpol={bond_covpol_status},balance={bond_balance_status},tension={bond_tension_status},"
+            f"elf_deloc={bond_elf_deloc_status},strength={bond_strength_status},pol_deloc={bond_pol_deloc_status})"
         )
 
     def _normalize_availability_status(self, raw_status: Any) -> str:
@@ -2910,6 +3210,14 @@ class FeatureExtractor:
             status_reason=status_reason,
             skip_reason=skip_reason,
             failure_reason=failure_reason,
+        )
+        builder.set_atom_metadata(
+            "lone_pair_polarization_proxy_v1",
+            availability_status=status,
+            status_reason=status_reason,
+            skip_reason=skip_reason,
+            failure_reason=failure_reason,
+            charge_source=None,
         )
         builder.set_bond_metadata(
             "bond_orbital_localization_proxy",
@@ -4316,7 +4624,9 @@ class FeatureExtractor:
             ("atomic_charge_iao_proxy", atom_feat.get("atomic_charge_iao_proxy")),
             ("atomic_charge_laplacian_coupling_proxy_v1", atom_feat.get("atomic_charge_laplacian_coupling_proxy_v1")),
             ("atomic_local_reactivity_proxy_v1", atom_feat.get("atomic_local_reactivity_proxy_v1")),
+            ("atomic_local_reactivity_refined_proxy_v1", atom_feat.get("atomic_local_reactivity_refined_proxy_v1")),
             ("lone_pair_environment_proxy_v1", atom_feat.get("lone_pair_environment_proxy_v1")),
+            ("lone_pair_polarization_proxy_v1", atom_feat.get("lone_pair_polarization_proxy_v1")),
             ("atomic_lone_pair_heuristic_proxy", atom_feat.get("atomic_lone_pair_heuristic_proxy")),
             ("elf_value", atom_feat.get("elf_value")),
         ]
@@ -4403,6 +4713,8 @@ class FeatureExtractor:
             ("bond_delocalization_localization_balance_proxy_v1", bond_feat.get("bond_delocalization_localization_balance_proxy_v1")),
             ("bond_elf_deloc_coupling_proxy_v1", bond_feat.get("bond_elf_deloc_coupling_proxy_v1")),
             ("bond_strength_pattern_proxy_v1", bond_feat.get("bond_strength_pattern_proxy_v1")),
+            ("bond_localization_tension_proxy_v1", bond_feat.get("bond_localization_tension_proxy_v1")),
+            ("bond_polarized_delocalization_proxy_v1", bond_feat.get("bond_polarized_delocalization_proxy_v1")),
         ]
         
         for name, arr in bond_arrays:

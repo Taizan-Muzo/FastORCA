@@ -1,45 +1,35 @@
+# Python cache/build
 __pycache__/
-consumer/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS/local editor artifacts
+.DS_Store
+
+# Local helper files
+AGENTS.md
+fastorca_source.txt
+export_source.py
+
+# Runtime outputs and artifacts
 logs/
 output/
 output*/
-producer/__pycache__/
+cubes/
+bridges/
 test_output/
-utils/__pycache__/
-AGENTS.md
-test_molecules.smi
-fastorca_source.txt
-export_source.py
-bridges/
-cubes/
-test_output_m5/
-test_output_m55_validation/
-test_output_m5_full/
-test_output_m5_full_v2/
-test_output_m5_v2/
-reports/   # 如果里面主要是生成结果
-*.pkl
-*.cube
-*.out
-*.sum
-# Python
-__pycache__/
-*.py[cod]
-
-# Runtime artifacts
-cubes/
-bridges/
 test_output*/
+reports/generated/
+reports/batch_summary_*.json
+reports/*_validation*.json
 *.pkl
 *.cube
 *.out
 *.sum
 *.log
 
-# Generated reports
-reports/*.json
-reports/generated/
-
-# Temp dirs
+# Local experiments/temp scripts
+run_*.py
+*_v2.py
 tmp/
 temp/
