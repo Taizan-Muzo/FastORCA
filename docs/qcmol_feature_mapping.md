@@ -8,16 +8,16 @@
 | InChI | basic_information | implemented_exact (`molecule_info.inchi`) | existing code + RDKit |
 | InChIKey | basic_information | implemented_exact (`molecule_info.inchikey`) | existing code + RDKit |
 | chemical formula | basic_information | implemented_exact (`molecule_info.formula`) | existing code (RDKit) |
-| SMART | basic_information | implemented_proxy (`molecule_info.smarts`, `needs_exact_qcmol_name`) | existing code (`RemoveHs + MolToSmarts`) + manual review |
+| SMART | basic_information | implemented_proxy (`molecule_info.smarts`, frozen substitute semantics) | existing code (`RemoveHs + MolToSmarts`) |
 | nickname / synonyms | basic_information | missing | external (PubChem/ChEBI) + manual review |
 | HOMO-LUMO gap | global_features | implemented_exact (`global_features.dft.homo_lumo_gap_hartree`) | existing code (PySCF) |
 | dipole moment | global_features | implemented_exact (`global_features.dft.dipole_moment_debye`) | existing code (PySCF) |
 | isosurface area | global_features | implemented_exact (`realspace_features.density_isosurface_area`) | existing code |
 | isosurface volume | global_features | implemented_exact (`realspace_features.density_isosurface_volume`) | existing code |
 | sphericity parameters | global_features | implemented_proxy (`realspace_features.density_sphericity_like`) | existing code |
-| molecule size | global_features | implemented_proxy (`global_features.geometry_size.bounding_box_diagonal_angstrom`) | existing code (geometry-based frozen definition) |
+| molecule size | global_features | implemented_proxy (`global_features.geometry_size.bounding_box_diagonal_angstrom`, frozen substitute semantics) | existing code (geometry-based frozen definition) |
 | molecular weight | global_features | implemented_exact (`global_features.rdkit.molecular_weight`) | existing code (RDKit) |
-| ionization affinity / ionization-related quantity | global_features | partial (`needs_exact_qcmol_name`, currently HOMO proxy) | PySCF + manual review |
+| ionization affinity / ionization-related quantity | global_features | implemented_proxy (`global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree`) | derived from HOMO (`IP_proxy = -E_HOMO`) |
 | charge | global_features | implemented_exact (`molecule_info.charge`) | existing code |
 | element type | atom_features | implemented_exact (`geometry.atom_symbols`) | existing code |
 | XYZ | atom_features | implemented_exact (`geometry.atom_coords_angstrom`) | existing code |
@@ -28,12 +28,12 @@
 | NPA | atom_features | implemented_proxy (`atom_features.atomic_charge_iao_proxy`) | existing code (IAO) |
 | NPA (exact) | atom_features | missing (schema placeholder: `external_bridge_roadmap.atom_level.npa_exact`) | external (NBO/Multiwfn) |
 | stereo info | bond_features | implemented_proxy (`bond_features.bond_stereo_info`) | existing code (RDKit) |
-| DI values / DI matrix | bond_features | implemented_proxy (`bond_features.bond_delocalization_index_proxy_v1`, `needs_exact_qcmol_name`) | existing code (Mayer/Wiberg proxy v1) |
+| DI values / DI matrix | bond_features | implemented_proxy (`bond_features.bond_delocalization_index_proxy_v1`, substitute-only frozen semantics) | existing code (Mayer/Wiberg proxy v1) |
 | ELF values | bond_features | implemented_exact (`bond_features.elf_bond_midpoint`) | existing code |
 | NBO-BD | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.nbo_bd`) | external (NBO/Multiwfn) |
 | LBO | bond_features | missing (schema placeholder: `external_bridge_roadmap.bond_level.lbo`) | external/manual review |
-| Mayer BL | bond_features | partial (`bond_orders_mayer`, naming to confirm) | existing code (PySCF) |
-| optimized 3D geometry | structural_features | partial (semantic reference to `geometry.atom_coords_angstrom`, no duplicated coordinates) | existing code + policy |
+| Mayer BL | bond_features | implemented_proxy (`bond_features.bond_orders_mayer`, qcMol-aligned substitute metadata frozen) | existing code (PySCF) |
+| optimized 3D geometry | structural_features | implemented_proxy (semantic reference to `geometry.atom_coords_angstrom` + fingerprint/natm reference) | existing code + policy |
 | most stable conformation | structural_features | implemented_proxy (RDKit ETKDG + MMFF/UFF ranking within current candidate set) | existing code (RDKit) |
 
 ## Notes

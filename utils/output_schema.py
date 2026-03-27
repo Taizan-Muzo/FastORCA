@@ -85,7 +85,8 @@ class UnifiedOutputBuilder:
                     "SMART": {
                         "mapped_path": "molecule_info.smarts",
                         "status": "implemented_proxy",
-                        "needs_exact_qcmol_name": True,  # may be SMART/SMARTS label in paper appendix
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Frozen substitute semantics: RDKit canonical SMARTS proxy (not qcMol exact SMART naming).",
                     },
                     "nickname_or_synonyms": {"mapped_path": None, "status": "missing"},
                 },
@@ -98,13 +99,14 @@ class UnifiedOutputBuilder:
                     "molecule_size": {
                         "mapped_path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
                         "status": "implemented_proxy",
-                        "notes": "Open-source frozen definition: 3D bounding-box diagonal from geometry coordinates.",
+                        "notes": "Frozen substitute semantics: 3D bounding-box diagonal from geometry coordinates (not exact qcMol size definition).",
                     },
                     "molecular_weight": {"mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented_exact"},
                     "ionization_affinity_or_related": {
-                        "mapped_path": "global_features.dft.homo_energy_hartree",
-                        "status": "partial",
-                        "needs_exact_qcmol_name": True,  # ionization affinity / ionization potential wording needs exact paper term
+                        "mapped_path": "global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree",
+                        "status": "implemented_proxy",
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Frozen substitute semantics: Koopmans-style ionization-related proxy derived from HOMO energy.",
                     },
                     "charge": {"mapped_path": "molecule_info.charge", "status": "implemented_exact"},
                 },
@@ -131,15 +133,24 @@ class UnifiedOutputBuilder:
                     "DI_values_or_matrix": {
                         "mapped_path": "bond_features.bond_delocalization_index_proxy_v1",
                         "status": "implemented_proxy",
-                        "needs_exact_qcmol_name": True,  # DI metric definition/name must follow qcMol exact term
+                        "needs_exact_qcmol_name": False,
+                        "notes": "Frozen substitute-only DI semantics; this is not an exact DI matrix.",
                     },
                     "ELF_values": {"mapped_path": "bond_features.elf_bond_midpoint", "status": "implemented_exact"},
                     "NBO_BD": {"mapped_path": "external_bridge_roadmap.bond_level.nbo_bd", "status": "missing"},
                     "LBO": {"mapped_path": "external_bridge_roadmap.bond_level.lbo", "status": "missing"},
-                    "Mayer_BL": {"mapped_path": "bond_features.bond_orders_mayer", "status": "partial"},
+                    "Mayer_BL": {
+                        "mapped_path": "bond_features.bond_orders_mayer",
+                        "status": "implemented_proxy",
+                        "notes": "Frozen substitute semantics: PySCF Mayer bond-order vector aligned to bond_indices.",
+                    },
                 },
                 "structural_features": {
-                    "optimized_3D_geometry": {"mapped_path": "structural_features.optimized_3d_geometry", "status": "partial"},
+                    "optimized_3D_geometry": {
+                        "mapped_path": "structural_features.optimized_3d_geometry",
+                        "status": "implemented_proxy",
+                        "notes": "Frozen semantic-reference representation with explicit link to geometry.atom_coords_angstrom.",
+                    },
                     "most_stable_conformation": {"mapped_path": "structural_features.most_stable_conformation", "status": "implemented_proxy"},
                 },
             },
@@ -168,6 +179,20 @@ class UnifiedOutputBuilder:
                     "homo_energy_hartree": None,
                     "lumo_energy_hartree": None,
                     "homo_lumo_gap_hartree": None,
+                    "ionization_related_proxy_v1": {
+                        "available": False,
+                        "definition_version": "v1",
+                        "proxy_family": "koopmans_homo_related",
+                        "homo_energy_hartree": None,
+                        "koopmans_ip_proxy_hartree": None,
+                        "koopmans_ip_proxy_ev": None,
+                        "status": "unavailable",
+                        "status_reason": "homo_energy_missing",
+                        "limitations": [
+                            "Koopmans-style related quantity only; not equivalent to adiabatic/vertical ionization affinity/exact qcMol target.",
+                            "depends on single-point HOMO energy quality in current DFT setup",
+                        ],
+                    },
                     "dipole_moment_debye": None,
                     "dipole_vector_debye": None,
                     "scf_converged": None,
@@ -348,6 +373,19 @@ class UnifiedOutputBuilder:
                         "source": "rdkit_mol_weight",
                         "limitations": []
                     },
+                    "ionization_related_proxy_v1": {
+                        "canonical_path": "global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree",
+                        "definition_version": "v1",
+                        "units": "hartree",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "derived_from_global_features.dft.homo_energy_hartree",
+                        "formula": "koopmans_ip_proxy_hartree = -E_HOMO",
+                        "limitations": [
+                            "related proxy only, not an exact ionization affinity / ionization potential target",
+                            "sensitive to chosen functional/basis and Koopmans approximation assumptions",
+                        ],
+                    },
                     "total_charge_e": {
                         "canonical_path": "molecule_info.charge",
                         "definition_version": "v1",
@@ -435,6 +473,11 @@ class UnifiedOutputBuilder:
                         "sources": {
                             "bader": "external_features.critic2.qtaim.bader_volumes"
                         },
+                        "bader_status": "not_attempted",
+                        "bader_status_reason": "not_attempted_by_default",
+                        "bader_numeric_count": None,
+                        "bader_null_count": None,
+                        "bader_non_numeric_count": None,
                         "limitations": [
                             "units follow critic2 parsed output and may depend on cube/input convention",
                             "bader volume field may be null when external bridge is not executed or parsing fails",
@@ -647,8 +690,23 @@ class UnifiedOutputBuilder:
                         "definition_version": "v1",
                         "is_proxy": True,
                         "is_heuristic": False,
+                        "substitute_scope": "qcMol_DI_values_or_matrix_substitute_only",
+                        "exact_di_matrix_available": False,
                         "limitations": [
                             "proxy DI definition based on Mayer/Wiberg bond orders"
+                        ],
+                    },
+                    "bond_orders_mayer": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "is_heuristic": False,
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_attempted_by_default",
+                        "substitute_scope": "qcMol_Mayer_BL_substitute",
+                        "alignment_note": "Per-bond Mayer bond-order values aligned with bond_features.bond_indices order.",
+                        "limitations": [
+                            "numeric convention depends on basis/set and implementation details",
+                            "substitute alignment; not guaranteed identical to every external Mayer_BL convention"
                         ],
                     },
                     "bond_orbital_localization_proxy": {
@@ -805,6 +863,10 @@ class UnifiedOutputBuilder:
                     "definition_version": "v1",
                     "proxy_family": "semantic_reference",
                     "coordinate_ref": "geometry.atom_coords_angstrom",
+                    "coordinate_embedding": "reference_only",
+                    "coordinate_source_of_truth": "geometry.atom_coords_angstrom",
+                    "natm_reference": None,
+                    "geometry_fingerprint_sha256": None,
                     "semantics": "reference_to_current_working_geometry",
                     "proxy_note": None,
                     "limitations": [],

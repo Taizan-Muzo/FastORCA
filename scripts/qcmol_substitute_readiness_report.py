@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from utils.qcmol_substitute_profile import (
     CANONICAL_SURFACE_ITEMS,
     DISCOURAGED_DEFAULT_FIELDS,
+    EXACT_ONLY_ARCHIVED_LIST,
     PROFILE_CONFIG_PATH,
     QCMOL_ALIGNMENT_MASTER_TABLE,
     QCMOL_ALIGNMENT_ITEMS,
@@ -158,6 +159,7 @@ def build_report(validation: Dict[str, Any], finalmile: Dict[str, Any], uplift_b
         "alignment_master_table": QCMOL_ALIGNMENT_MASTER_TABLE,
         "default_deliverable_alignment_items": deliverable_rows,
         "roadmap_placeholder_alignment_items": roadmap_rows,
+        "exact_only_archived_list": EXACT_ONLY_ARCHIVED_LIST,
         "remaining_alignment_gaps": gaps,
         "canonical_surface": _canonical_surface_summary(),
         "readiness_judgement": judgement,

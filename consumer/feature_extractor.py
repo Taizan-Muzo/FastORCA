@@ -5,6 +5,7 @@ CPU 特征提取模块
 
 import os
 import json
+import hashlib
 import subprocess
 import tempfile
 import traceback
@@ -1231,6 +1232,10 @@ class FeatureExtractor:
                 "definition_version": "v1",
                 "proxy_family": "semantic_reference",
                 "coordinate_ref": "geometry.atom_coords_angstrom",
+                "coordinate_embedding": "reference_only",
+                "coordinate_source_of_truth": "geometry.atom_coords_angstrom",
+                "natm_reference": int(mol.natm),
+                "geometry_fingerprint_sha256": self._compute_geometry_fingerprint_sha256(mol),
                 "semantics": "reference_to_current_working_geometry",
                 "proxy_note": None,
                 "limitations": [],
@@ -1296,6 +1301,9 @@ class FeatureExtractor:
                     homo_energy_hartree=global_features.get("homo_energy"),
                     lumo_energy_hartree=global_features.get("lumo_energy"),
                     homo_lumo_gap_hartree=global_features.get("homo_lumo_gap"),
+                    ionization_related_proxy_v1=self._build_ionization_related_proxy_v1(
+                        global_features.get("homo_energy")
+                    ),
                     dipole_moment_debye=global_features.get("dipole_moment"),
                     dipole_vector_debye=global_features.get("dipole_vector"),
                     dispersion_correction=getattr(mf, 'disp', None) is not None
@@ -1448,6 +1456,20 @@ class FeatureExtractor:
                         else "Proxy stereo unavailable without aligned RDKit topology; filled as 'unknown'."
                     ),
                 )
+                if len(bond_indices) == 0:
+                    mayer_status = "not_attempted"
+                    mayer_reason = "no_bonds_detected"
+                elif len(mayer_values) == len(bond_indices) and len(mayer_values) > 0:
+                    mayer_status = "success"
+                    mayer_reason = "ok"
+                else:
+                    mayer_status = "unavailable"
+                    mayer_reason = "mayer_values_missing_or_length_mismatch"
+                builder.set_bond_metadata(
+                    "bond_orders_mayer",
+                    availability_status=mayer_status,
+                    status_reason=mayer_reason,
+                )
             except Exception as e:
                 logger.warning(f"[{molecule_id}] Bond order extraction failed: {e}")
                 # 失败时仍设置空数组
@@ -1465,6 +1487,11 @@ class FeatureExtractor:
                     source="rdkit_bond_stereo_perception",
                     is_proxy=True,
                     proxy_note=f"Bond stereo extraction failed: {e}",
+                )
+                builder.set_bond_metadata(
+                    "bond_orders_mayer",
+                    availability_status="unavailable",
+                    status_reason=f"bond_order_extraction_failed:{e}",
                 )
         
         # ============ 步骤 7: 提取 ELF 特征（扩展特征） ============
@@ -2377,6 +2404,72 @@ class FeatureExtractor:
             except (TypeError, ValueError):
                 return None
         return out
+
+    def _build_ionization_related_proxy_v1(self, homo_energy_hartree: Optional[float]) -> Dict[str, Any]:
+        """
+        Build a frozen substitute for qcMol ionization-affinity-related slot.
+
+        Uses a Koopmans-style proxy derived from HOMO:
+            IP_proxy(hartree) = -E_HOMO
+        """
+        if homo_energy_hartree is None:
+            return {
+                "available": False,
+                "definition_version": "v1",
+                "proxy_family": "koopmans_homo_related",
+                "homo_energy_hartree": None,
+                "koopmans_ip_proxy_hartree": None,
+                "koopmans_ip_proxy_ev": None,
+                "status": "unavailable",
+                "status_reason": "homo_energy_missing",
+                "limitations": [
+                    "Koopmans-style related quantity only; not equivalent to adiabatic/vertical ionization affinity/exact qcMol target.",
+                    "depends on single-point HOMO energy quality in current DFT setup",
+                ],
+            }
+        try:
+            homo = float(homo_energy_hartree)
+        except (TypeError, ValueError):
+            return {
+                "available": False,
+                "definition_version": "v1",
+                "proxy_family": "koopmans_homo_related",
+                "homo_energy_hartree": None,
+                "koopmans_ip_proxy_hartree": None,
+                "koopmans_ip_proxy_ev": None,
+                "status": "unavailable",
+                "status_reason": "homo_energy_non_numeric",
+                "limitations": [
+                    "Koopmans-style related quantity only; not equivalent to adiabatic/vertical ionization affinity/exact qcMol target.",
+                    "depends on single-point HOMO energy quality in current DFT setup",
+                ],
+            }
+        ip_hartree = float(-homo)
+        return {
+            "available": True,
+            "definition_version": "v1",
+            "proxy_family": "koopmans_homo_related",
+            "homo_energy_hartree": homo,
+            "koopmans_ip_proxy_hartree": ip_hartree,
+            "koopmans_ip_proxy_ev": float(ip_hartree * 27.211386245988),
+            "status": "success",
+            "status_reason": "ok",
+            "limitations": [
+                "Koopmans-style related quantity only; not equivalent to adiabatic/vertical ionization affinity/exact qcMol target.",
+                "depends on single-point HOMO energy quality in current DFT setup",
+            ],
+        }
+
+    def _compute_geometry_fingerprint_sha256(self, mol: gto.Mole) -> str:
+        """Compute a stable geometry fingerprint for structural semantic-reference tracing."""
+        payload = {
+            "atom_symbols": [str(mol.atom_symbol(i)) for i in range(mol.natm)],
+            "coords_angstrom": [
+                [float(x), float(y), float(z)] for x, y, z in mol.atom_coords(unit="A").tolist()
+            ],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def _summarize_numeric_vector(self, values: List[float]) -> Optional[Dict[str, Any]]:
         """Build compact stats for a numeric vector."""
@@ -3454,7 +3547,7 @@ class FeatureExtractor:
         if bader_volume_values is None:
             picked_values, picked_key = self._pick_external_integrated_property_values(
                 atomic_integrated_properties,
-                aliases=["Volume", "Vol"],
+                aliases=["Volume", "Vol", "V", "Omega", "BasinVolume", "BasinVol"],
             )
             if picked_values is not None:
                 bader_volume_values = picked_values
@@ -3466,21 +3559,48 @@ class FeatureExtractor:
             natm=natm,
             field_name="bader_volumes",
         )
-        if (
+        volume_numeric_count = 0
+        volume_null_count = 0
+        volume_non_numeric_count = 0
+        if bader_volume_status == "success" and isinstance(bader_volumes, list):
+            converted_volumes: List[float] = []
+            for v in bader_volumes:
+                if v is None:
+                    volume_null_count += 1
+                    continue
+                try:
+                    converted_volumes.append(float(v))
+                    volume_numeric_count += 1
+                except (TypeError, ValueError):
+                    volume_non_numeric_count += 1
+            if volume_numeric_count == 0 and volume_null_count > 0 and volume_non_numeric_count == 0:
+                bader_volume_status = "unavailable"
+                bader_volume_reason = "bader_volume_column_present_but_all_null"
+                bader_volumes = None
+            elif volume_non_numeric_count > 0:
+                bader_volume_status = "unavailable"
+                bader_volume_reason = "bader_volume_column_present_but_non_numeric"
+                bader_volumes = None
+            elif volume_null_count > 0:
+                bader_volume_status = "unavailable"
+                bader_volume_reason = "bader_volume_column_present_but_partially_null"
+                bader_volumes = None
+            else:
+                bader_volumes = converted_volumes
+        elif (
             bader_volume_status == "unavailable"
             and bader_volume_reason == "bader_volumes_missing_after_success"
             and execution_status == "success"
         ):
             parser_note = qtaim_meta.get("atomic_property_parse_note")
             if parser_note == "integrated_atomic_properties_parsed_without_volume_column":
-                bader_volume_reason = "bader_volume_column_not_reported_in_critic2_output"
+                bader_volume_reason = "bader_volume_column_truly_missing"
+            elif parser_note == "integrated_atomic_properties_volume_column_present_but_non_numeric":
+                bader_volume_reason = "bader_volume_column_present_but_non_numeric"
+            elif qtaim_meta.get("atomic_property_volume_column"):
+                bader_volume_reason = "bader_volume_column_present_but_non_numeric"
             else:
                 bader_volume_reason = "bader_volumes_missing_after_success"
-        if bader_volume_status == "success" and isinstance(bader_volumes, list):
-            if not any(v is not None for v in bader_volumes):
-                bader_volume_status = "unavailable"
-                bader_volume_reason = "bader_volume_column_present_but_all_null"
-                bader_volumes = None
 
         parser_note = qtaim_meta.get("atomic_property_parse_note")
         return {
@@ -3495,6 +3615,9 @@ class FeatureExtractor:
             "population_sum_tolerance": population_sum_tolerance,
             "bader_population_source_key": bader_population_source_key,
             "bader_volume_source_key": bader_volume_source_key,
+            "bader_volume_numeric_count": volume_numeric_count,
+            "bader_volume_null_count": volume_null_count,
+            "bader_volume_non_numeric_count": volume_non_numeric_count,
             "bader_laplacian_status": lap_status,
             "bader_laplacian_reason": lap_reason,
             "bader_laplacian_values": lap_values_clean,
@@ -3812,6 +3935,14 @@ class FeatureExtractor:
             bader_volume_status_reason=bader_volume_reason,
         )
         builder.set_atom_metadata(
+            "atomic_density_partition_volume_proxy",
+            bader_status=bader_volume_status,
+            bader_status_reason=bader_volume_reason,
+            bader_numeric_count=eval_result.get("bader_volume_numeric_count"),
+            bader_null_count=eval_result.get("bader_volume_null_count"),
+            bader_non_numeric_count=eval_result.get("bader_volume_non_numeric_count"),
+        )
+        builder.set_atom_metadata(
             "atomic_density_partition_laplacian_proxy_v1",
             bader_status=bader_laplacian_status,
             bader_status_reason=bader_laplacian_reason,
@@ -3830,6 +3961,9 @@ class FeatureExtractor:
             charge_meta["bader_population_sum_tol_rel"] = self.BADER_POPULATION_SUM_REL_TOL
             charge_meta["bader_population_source"] = eval_result["bader_population_source_key"]
             charge_meta["bader_volume_source"] = eval_result["bader_volume_source_key"]
+            charge_meta["bader_volume_numeric_count"] = eval_result.get("bader_volume_numeric_count")
+            charge_meta["bader_volume_null_count"] = eval_result.get("bader_volume_null_count")
+            charge_meta["bader_volume_non_numeric_count"] = eval_result.get("bader_volume_non_numeric_count")
             charge_meta["bader_laplacian_source"] = eval_result.get("bader_laplacian_source_key")
             charge_meta["bader_population_parser_note"] = eval_result["parser_note"]
             charge_meta["bader_population_status"] = eval_result["bader_population_status"]

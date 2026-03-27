@@ -34,6 +34,8 @@ This document defines the closure-sprint source of truth for qcMol gap closure.
 - Prevents ad-hoc “gap guessing”.
 - Keeps roadmap-only and rejected-as-exact families explicit under open-source constraints.
 - Gives a stable target for closure validation scripts and readiness reporting.
+- Freezes substitute-only semantics for redefine items (SMART / molecule_size / ionization-related / DI).
+- Treats exact-only families (NAO/LI/ADCH/NPA_exact/NBO_BD/LBO) as explicitly archived roadmap-only scope.
 
 ## Snapshot Command
 
@@ -51,4 +53,3 @@ python scripts/qcmol_alignment_closure_validation.py \
   --output-json <report.json> \
   --output-md <report.md>
 ```
-

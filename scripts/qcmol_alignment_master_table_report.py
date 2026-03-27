@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from utils.qcmol_substitute_profile import (  # noqa: E402
+    EXACT_ONLY_ARCHIVED_LIST,
     QCMOL_ALIGNMENT_MASTER_TABLE,
     remaining_alignment_gaps,
     summarize_alignment_next_actions,
@@ -47,6 +48,7 @@ def main() -> None:
         "next_action_counts": action_counts,
         "remaining_gap_count": len(gaps),
         "remaining_gaps": gaps,
+        "exact_only_archived_list": EXACT_ONLY_ARCHIVED_LIST,
     }
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -78,6 +80,11 @@ def main() -> None:
             f"- {row['section']}.{row['qcMol_item_name']}: status={row['current_status']}, "
             f"next_action={row['next_action']}, mapped_path={row['mapped_path']}"
         )
+    lines.extend(["", f"## Exact-Only Archived ({len(EXACT_ONLY_ARCHIVED_LIST)})"])
+    for row in EXACT_ONLY_ARCHIVED_LIST:
+        lines.append(
+            f"- {row['qcMol_item_name']}: status={row['status']}, next_action={row['next_action']}, mapped_path={row['mapped_path']}"
+        )
     out_md.write_text("\n".join(lines), encoding="utf-8")
 
     print(
@@ -95,4 +102,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

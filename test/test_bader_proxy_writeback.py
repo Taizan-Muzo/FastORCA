@@ -149,7 +149,57 @@ def test_bader_volume_missing_after_success_has_specific_reason():
     meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_charge_proxy"]
     assert meta["bader_status"] == "success"
     assert meta["bader_volume_status"] == "unavailable"
-    assert "not_reported" in meta["bader_volume_status_reason"]
+    assert meta["bader_volume_status_reason"] == "bader_volume_column_truly_missing"
+    assert builder.data["atom_features"]["atomic_density_partition_volume_proxy"]["bader"] is None
+
+
+def test_bader_volume_non_numeric_after_success_is_unavailable():
+    fx = FeatureExtractor()
+    builder = _make_builder(natm=3)
+    builder.set_external_bridge("critic2", execution_status="success", failure_reason=None)
+    builder.set_external_features(
+        "critic2",
+        {
+            "qtaim": {
+                "bader_populations": [5.9, 8.2, 0.9],
+                "bader_volumes": [12.0, "bad", 6.0],
+                "n_bader_volumes": 3,
+            }
+        },
+    )
+
+    fx._sync_bader_partition_proxy_from_external(builder, "m_test")
+    meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_charge_proxy"]
+    vol_meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_volume_proxy"]
+    assert meta["bader_status"] == "success"
+    assert meta["bader_volume_status"] == "unavailable"
+    assert meta["bader_volume_status_reason"] == "bader_volume_column_present_but_non_numeric"
+    assert vol_meta["bader_non_numeric_count"] == 1
+    assert builder.data["atom_features"]["atomic_density_partition_volume_proxy"]["bader"] is None
+
+
+def test_bader_volume_partially_null_after_success_is_unavailable():
+    fx = FeatureExtractor()
+    builder = _make_builder(natm=3)
+    builder.set_external_bridge("critic2", execution_status="success", failure_reason=None)
+    builder.set_external_features(
+        "critic2",
+        {
+            "qtaim": {
+                "bader_populations": [5.9, 8.2, 0.9],
+                "bader_volumes": [12.0, None, 6.0],
+                "n_bader_volumes": 3,
+            }
+        },
+    )
+
+    fx._sync_bader_partition_proxy_from_external(builder, "m_test")
+    meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_charge_proxy"]
+    vol_meta = builder.data["atom_features"]["metadata"]["atomic_density_partition_volume_proxy"]
+    assert meta["bader_status"] == "success"
+    assert meta["bader_volume_status"] == "unavailable"
+    assert meta["bader_volume_status_reason"] == "bader_volume_column_present_but_partially_null"
+    assert vol_meta["bader_null_count"] == 1
     assert builder.data["atom_features"]["atomic_density_partition_volume_proxy"]["bader"] is None
 
 

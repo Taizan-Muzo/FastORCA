@@ -261,6 +261,8 @@ class Critic2Adapter(ExternalAdapter):
                     "atomic_property_pop_column": None,
                     "atomic_property_volume_column": None,
                     "atomic_property_volume_available": False,
+                    "atomic_property_volume_numeric_count": 0,
+                    "atomic_property_volume_null_count": 0,
                     "atomic_property_parse_note": None,
                     "atomic_property_table_excerpt": [],
                     "atomic_integrated_property_columns": None,
@@ -348,6 +350,8 @@ class Critic2Adapter(ExternalAdapter):
                     "atomic_property_pop_column": "Population",
                     "atomic_property_volume_column": "Volume",
                     "atomic_property_volume_available": True,
+                    "atomic_property_volume_numeric_count": len(bader_volumes),
+                    "atomic_property_volume_null_count": 0,
                     "atomic_property_parse_note": "parsed_from_atomic_properties_table",
                     "atomic_integrated_property_columns": ["Population", "Volume"],
                 }
@@ -475,7 +479,7 @@ class Critic2Adapter(ExternalAdapter):
             },
             {
                 "key": "volume",
-                "aliases": ["Volume", "Vol"],
+                "aliases": ["Volume", "Vol", "V", "Omega", "BasinVolume", "BasinVol"],
                 "fallback_key": "bader_volumes",
                 "expected_reliability": "medium_low",
                 "value_type": "basin_volume",
@@ -523,6 +527,14 @@ class Critic2Adapter(ExternalAdapter):
                 if spec["key"] == "population_e":
                     status = "rejected"
                     reason = "population_column_missing_or_non_numeric"
+                elif spec["key"] == "volume":
+                    if raw_values is None:
+                        reason = "column_missing"
+                    elif isinstance(raw_values, list) and len(raw_values) > 0:
+                        if all(v is None for v in raw_values):
+                            reason = "column_present_all_null"
+                        else:
+                            reason = "column_present_non_numeric_or_partially_null"
                 candidate_assessment[spec["key"]] = {
                     "status": status,
                     "source_key": source_key,
@@ -656,7 +668,7 @@ class Critic2Adapter(ExternalAdapter):
                     vol_idx = self._pick_column_index(
                         header_tokens_raw,
                         header_tokens_norm,
-                        ["Volume", "Vol"],
+                        ["Volume", "Vol", "V", "Omega", "BasinVolume", "BasinVol"],
                     )
                     mult_idx = self._pick_column_index(
                         header_tokens_raw,
@@ -715,6 +727,8 @@ class Critic2Adapter(ExternalAdapter):
         volume_values: Optional[List[Optional[float]]] = volumes if vol_idx is not None else None
         if vol_idx is None and populations:
             parse_note = "integrated_atomic_properties_parsed_without_volume_column"
+        elif vol_idx is not None and populations and not any(v is not None for v in volumes):
+            parse_note = "integrated_atomic_properties_volume_column_present_but_non_numeric"
 
         # Keep only meaningful columns (at least one numeric value parsed).
         cleaned_property_values: Dict[str, List[Optional[float]]] = {}
@@ -731,6 +745,8 @@ class Critic2Adapter(ExternalAdapter):
             "atomic_property_pop_column": header_tokens_raw[pop_idx] if (pop_idx is not None and pop_idx < len(header_tokens_raw)) else None,
             "atomic_property_volume_column": header_tokens_raw[vol_idx] if (vol_idx is not None and vol_idx < len(header_tokens_raw)) else None,
             "atomic_property_volume_available": vol_idx is not None,
+            "atomic_property_volume_numeric_count": int(sum(1 for v in volumes if v is not None)) if vol_idx is not None else 0,
+            "atomic_property_volume_null_count": int(sum(1 for v in volumes if v is None)) if vol_idx is not None else 0,
             "atomic_property_parse_note": parse_note,
             "atomic_property_table_excerpt": table_excerpt,
             "atomic_integrated_property_columns": list(cleaned_property_values.keys()) if cleaned_property_values else None,
