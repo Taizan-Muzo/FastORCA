@@ -1212,17 +1212,13 @@ class FeatureExtractor:
                 point_group=self._detect_point_group(mol)
             )
 
-            # 冻结 molecule_size 主定义（B3.2 / qcMol gap closure）：
-            # 主字段 = 3D 包围盒对角线（angstrom）；辅助字段 = heavy_atom_count_proxy。
-            bbox_diag = self._compute_bounding_box_diagonal_angstrom(mol)
-            heavy_atom_count_proxy = builder.data.get("global_features", {}).get("rdkit", {}).get("heavy_atom_count")
-            if heavy_atom_count_proxy is None:
-                heavy_atom_count_proxy = int(
-                    sum(1 for i in range(mol.natm) if str(mol.atom_symbol(i)).upper() != "H")
-                )
-            builder.set_global_geometry_size(
-                bounding_box_diagonal_angstrom=bbox_diag,
-                heavy_atom_count_proxy=int(heavy_atom_count_proxy),
+            # 冻结 molecule_size family（size primary + companion proxies）。
+            # 注：bond count 需要在键拓扑完成后再刷新一次。
+            self._update_geometry_size_family(
+                builder=builder,
+                mol=mol,
+                mol_rdkit=mol_rdkit,
+                bond_indices=None,
             )
 
             optimized_geometry_semantic = {
@@ -1493,6 +1489,15 @@ class FeatureExtractor:
                     availability_status="unavailable",
                     status_reason=f"bond_order_extraction_failed:{e}",
                 )
+
+            # 使用最终 bond_indices 刷新 molecule_size family，
+            # 保证 num_bonds_proxy 优先采用显式 bond 列表计数。
+            self._update_geometry_size_family(
+                builder=builder,
+                mol=mol,
+                mol_rdkit=mol_rdkit,
+                bond_indices=bond_indices,
+            )
         
         # ============ 步骤 7: 提取 ELF 特征（扩展特征） ============
         elf_bond_midpoints: List[float] = []  # 默认空数组
@@ -1860,6 +1865,7 @@ class FeatureExtractor:
                     density_isosurface_volume=realspace_result.get("density_isosurface_volume"),
                     density_isosurface_area=realspace_result.get("density_isosurface_area"),
                     density_sphericity_like=realspace_result.get("density_sphericity_like"),
+                    density_shape_descriptor_family_v1=realspace_result.get("density_shape_descriptor_family_v1"),
                     esp_extrema_summary=realspace_result.get("esp_extrema_summary"),
                     orbital_extent_homo=realspace_result.get("orbital_extent_homo"),
                     orbital_extent_lumo=realspace_result.get("orbital_extent_lumo"),
@@ -4374,6 +4380,130 @@ class FeatureExtractor:
             return point_group
         except Exception:
             return "C1"
+
+    def _count_heavy_atoms_from_symbols(self, atom_symbols: Any) -> Optional[int]:
+        """Fallback heavy-atom count from geometry symbols."""
+        if not isinstance(atom_symbols, list) or len(atom_symbols) == 0:
+            return None
+        return int(sum(1 for s in atom_symbols if str(s).upper() != "H"))
+
+    def _update_geometry_size_family(
+        self,
+        builder: UnifiedOutputBuilder,
+        mol: gto.Mole,
+        mol_rdkit: Optional[Any] = None,
+        bond_indices: Optional[List[List[int]]] = None,
+    ) -> None:
+        """
+        Update molecule_size substitute family (v2) with explicit source priority.
+
+        Priority rules:
+        - heavy_atom_count_proxy: rdkit.heavy_atom_count -> geometry symbols fallback
+        - total_atom_count_proxy: molecule_info.natm -> geometry symbols fallback
+        - num_bonds_proxy: len(bond_indices) -> rdkit.GetNumBonds() fallback
+        - num_rings_proxy: rdkit ring count only (null when rdkit unavailable)
+        """
+        bbox_diag = self._compute_bounding_box_diagonal_angstrom(mol)
+        bbox_status = "success" if isinstance(bbox_diag, float) and bbox_diag >= 0.0 else "unavailable"
+        bbox_reason = "ok" if bbox_status == "success" else "bbox_from_geometry_unavailable"
+
+        atom_symbols = builder.data.get("geometry", {}).get("atom_symbols")
+        rdkit_heavy = builder.data.get("global_features", {}).get("rdkit", {}).get("heavy_atom_count")
+        heavy_source = "rdkit_heavy_atom_count"
+        heavy_reason = "ok_from_rdkit"
+        heavy_count = None
+        if rdkit_heavy is not None:
+            heavy_count = int(rdkit_heavy)
+        else:
+            heavy_count = self._count_heavy_atoms_from_symbols(atom_symbols)
+            heavy_source = "geometry_atom_symbols_non_h_count"
+            heavy_reason = "fallback_geometry_symbols" if heavy_count is not None else "heavy_atom_count_unavailable"
+
+        natm_from_info = builder.data.get("molecule_info", {}).get("natm")
+        total_count = None
+        total_source = "molecule_info.natm"
+        total_reason = "ok_from_molecule_info"
+        if isinstance(natm_from_info, int) and natm_from_info >= 0:
+            total_count = int(natm_from_info)
+        elif isinstance(atom_symbols, list):
+            total_count = int(len(atom_symbols))
+            total_source = "len(geometry.atom_symbols)"
+            total_reason = "fallback_geometry_symbols"
+        else:
+            total_source = "molecule_info_natm_or_geometry_symbols"
+            total_reason = "total_atom_count_unavailable"
+
+        num_bonds = None
+        bonds_source = "len(bond_features.bond_indices)"
+        bonds_reason = "num_bonds_unavailable"
+        if isinstance(bond_indices, list):
+            num_bonds = int(len(bond_indices))
+            bonds_reason = "ok_from_bond_indices"
+        elif mol_rdkit is not None:
+            try:
+                num_bonds = int(mol_rdkit.GetNumBonds())
+                bonds_source = "rdkit_num_bonds"
+                bonds_reason = "fallback_rdkit_num_bonds"
+            except Exception:
+                num_bonds = None
+                bonds_source = "rdkit_num_bonds"
+                bonds_reason = "rdkit_num_bonds_failed"
+
+        num_rings = None
+        rings_source = "rdkit_ring_info"
+        rings_reason = "rdkit_unavailable_for_ring_count"
+        if mol_rdkit is not None:
+            try:
+                ring_info = mol_rdkit.GetRingInfo()
+                num_rings = int(ring_info.NumRings()) if ring_info is not None else 0
+                rings_reason = "ok"
+            except Exception:
+                num_rings = None
+                rings_reason = "rdkit_ring_count_failed"
+
+        builder.set_global_geometry_size(
+            bounding_box_diagonal_angstrom=bbox_diag,
+            heavy_atom_count_proxy=(int(heavy_count) if heavy_count is not None else None),
+            total_atom_count_proxy=(int(total_count) if total_count is not None else None),
+            num_bonds_proxy=(int(num_bonds) if num_bonds is not None else None),
+            num_rings_proxy=(int(num_rings) if num_rings is not None else None),
+        )
+
+        builder.set_global_metadata(
+            "molecule_size_bounding_box_diagonal_angstrom",
+            definition_version="v2",
+            source="geometry.atom_coords_angstrom",
+            availability_status=bbox_status,
+            status_reason=bbox_reason,
+        )
+        builder.set_global_metadata(
+            "molecule_size_heavy_atom_count_proxy",
+            definition_version="v2",
+            source=heavy_source,
+            availability_status=("success" if heavy_count is not None else "unavailable"),
+            status_reason=heavy_reason,
+        )
+        builder.set_global_metadata(
+            "molecule_size_total_atom_count_proxy",
+            definition_version="v2",
+            source=total_source,
+            availability_status=("success" if total_count is not None else "unavailable"),
+            status_reason=total_reason,
+        )
+        builder.set_global_metadata(
+            "molecule_size_num_bonds_proxy",
+            definition_version="v2",
+            source=bonds_source,
+            availability_status=("success" if num_bonds is not None else "unavailable"),
+            status_reason=bonds_reason,
+        )
+        builder.set_global_metadata(
+            "molecule_size_num_rings_proxy",
+            definition_version="v2",
+            source=rings_source,
+            availability_status=("success" if num_rings is not None else "unavailable"),
+            status_reason=rings_reason,
+        )
 
     def _compute_bounding_box_diagonal_angstrom(self, mol: gto.Mole) -> Optional[float]:
         """

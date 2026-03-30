@@ -30,7 +30,7 @@ from pyscf.dft import numint
 
 # 物理常数
 BOHR_TO_ANGSTROM = 0.52917720859  # Bohr -> Å
-REALSPACE_DEFINITION_VERSION = "2.0.0"
+REALSPACE_DEFINITION_VERSION = "2.1.0"
 COORD_QUANTIZATION_DECIMALS = 6
 VALUE_QUANTIZATION_DECIMALS = 8
 
@@ -54,6 +54,8 @@ DEFAULT_CUBE_CONFIG = {
     "max_total_grid_points": 1_000_000,
     "density_isovalue": 0.001,  # e/Bohr^3
     "orbital_isovalue": 0.05,   # 用于可视化，不用于 extent 计算
+    "density_shape_mass_cutoff": 0.95,
+    "density_shape_eps": 1e-12,
     "output_directory": "cubes/"
 }
 
@@ -543,6 +545,7 @@ class RealspaceFeatureExtractor:
             "density_isosurface_volume": None,
             "density_isosurface_area": None,
             "density_sphericity_like": None,
+            "density_shape_descriptor_family_v1": None,
             "esp_extrema_summary": None,
             "orbital_extent_homo": None,
             "orbital_extent_lumo": None,
@@ -587,6 +590,29 @@ class RealspaceFeatureExtractor:
                     "lumo_cube": 0.0,
                     "shape_core": 0.0,
                     "shape_extended": 0.0,
+                },
+                "density_shape_descriptor_family_v1": {
+                    "definition_version": "v1",
+                    "is_proxy": True,
+                    "proxy_family": "density_shape_descriptor_family",
+                    "mass_cutoff_default": float(self.config.get("density_shape_mass_cutoff", 0.95)),
+                    "eps": float(self.config.get("density_shape_eps", 1e-12)),
+                    "coordinate_source": "realspace density cube grid",
+                    "weight_definition": "density_value",
+                    "covariance_definition": "weighted covariance over mass-cutoff selected density points",
+                    "eigenvalue_order": "lambda1>=lambda2>=lambda3>=0",
+                    "normalization_rule": "lambda_i_norm = lambda_i / (lambda1 + lambda2 + lambda3 + eps)",
+                    "formula_sphericity": "3*lambda3/(lambda1+lambda2+lambda3+eps)",
+                    "formula_asphericity": "(lambda1 - 0.5*(lambda2+lambda3))/(lambda1+lambda2+lambda3+eps)",
+                    "formula_anisotropy": "((lambda1-lambda2)^2 + (lambda2-lambda3)^2 + (lambda3-lambda1)^2)/(2*(lambda1+lambda2+lambda3)^2+eps)",
+                    "formula_elongation": "(lambda1-lambda2)/(lambda1+eps)",
+                    "formula_planarity": "(lambda2-lambda3)/(lambda1+eps)",
+                    "limitations": [
+                        "open-source substitute descriptor family; not qcMol exact internal formula",
+                        "depends on grid resolution/margin and mass cutoff configuration",
+                    ],
+                    "status": "not_attempted",
+                    "status_reason": "not_computed_yet",
                 },
                 "extraction_status": "not_attempted",
                 "failure_reason": None,
@@ -682,6 +708,7 @@ class RealspaceFeatureExtractor:
         threshold = self.config["density_isovalue"]
         mask = rho_3d > threshold
         n_inside = np.sum(mask)
+        coords_3d_bohr = coords.reshape(*grid_shape, 3)
 
         if core_enabled:
             t_core = time.time()
@@ -705,15 +732,42 @@ class RealspaceFeatureExtractor:
                 "approximation_note": "counts faces between inside/outside voxels, not marching cubes"
             }
             
-            # === 3. Density sphericity-like ===
-            if n_inside > 10:  # 需要足够点才能计算形状
-                sphericity = self._compute_sphericity(mask, coords.reshape(*grid_shape, 3))
+            # === 3. Density shape descriptor family (mass-cutoff weighted) ===
+            shape_family = self._compute_density_shape_descriptor_family(
+                rho_3d=rho_3d,
+                coords_3d_bohr=coords_3d_bohr,
+                mass_cutoff=float(self.config.get("density_shape_mass_cutoff", 0.95)),
+                eps=float(self.config.get("density_shape_eps", 1e-12)),
+            )
+            result["density_shape_descriptor_family_v1"] = shape_family
+            shape_meta = result["metadata"].get("density_shape_descriptor_family_v1", {})
+            shape_meta["status"] = str(shape_family.get("status", "unavailable"))
+            shape_meta["status_reason"] = str(shape_family.get("status_reason", "unknown"))
+            shape_meta["mass_cutoff_default"] = float(shape_family.get("mass_cutoff", self.config.get("density_shape_mass_cutoff", 0.95)))
+            shape_meta["eps"] = float(shape_family.get("eps", self.config.get("density_shape_eps", 1e-12)))
+            result["metadata"]["density_shape_descriptor_family_v1"] = shape_meta
+
+            # === 4. Legacy compatibility field density_sphericity_like ===
+            # Compatibility strategy A: keep old field but derive from new family.
+            if shape_family.get("status") == "success" and shape_family.get("sphericity") is not None:
+                result["density_sphericity_like"] = {
+                    "value": float(shape_family["sphericity"]),
+                    "threshold": threshold,
+                    "formula": "s = 3 * lambda3 / (lambda1 + lambda2 + lambda3 + eps)",
+                    "range": "[0, 1], 1=perfect_sphere, 0=line",
+                    "description": "legacy compatibility field derived from density_shape_descriptor_family_v1.sphericity",
+                    "canonical_successor": "realspace_features.density_shape_descriptor_family_v1.sphericity",
+                }
+            elif n_inside > 10:
+                # Fallback to previous threshold-mask method when family is unavailable.
+                sphericity = self._compute_sphericity(mask, coords_3d_bohr)
                 result["density_sphericity_like"] = {
                     "value": float(sphericity),
                     "threshold": threshold,
                     "formula": "s = 3 * lambda3 / (lambda1 + lambda2 + lambda3)",
                     "range": "[0, 1], 1=perfect_sphere, 0=line",
-                    "description": "based on covariance matrix eigenvalues of density mask"
+                    "description": "legacy threshold-mask fallback (density_shape_descriptor_family_v1 unavailable)",
+                    "canonical_successor": "realspace_features.density_shape_descriptor_family_v1.sphericity",
                 }
             stage_timing["shape_core"] = float(time.time() - t_core)
 
@@ -831,6 +885,108 @@ class RealspaceFeatureExtractor:
         total_area = (n_faces_x + n_faces_y + n_faces_z) * face_area
         return float(total_area)
     
+    def _compute_density_shape_descriptor_family(
+        self,
+        rho_3d: np.ndarray,
+        coords_3d_bohr: np.ndarray,
+        mass_cutoff: float = 0.95,
+        eps: float = 1e-12,
+    ) -> Dict[str, Any]:
+        """
+        Density shape descriptor family v1.
+        Uses mass-cutoff selected density points (not simple threshold mask).
+        """
+        out: Dict[str, Any] = {
+            "mass_cutoff": float(mass_cutoff),
+            "eps": float(eps),
+            "n_points_total": int(rho_3d.size),
+            "n_points_selected": None,
+            "selected_density_fraction": None,
+            "center_of_mass_angstrom": None,
+            "eigenvalues_raw": None,
+            "eigenvalues_normalized": None,
+            "sphericity": None,
+            "asphericity": None,
+            "anisotropy": None,
+            "elongation": None,
+            "planarity": None,
+            "status": "unavailable",
+            "status_reason": "not_computed",
+        }
+
+        try:
+            rho_flat = np.asarray(rho_3d, dtype=float).reshape(-1)
+            coords_flat_ang = np.asarray(coords_3d_bohr, dtype=float).reshape(-1, 3) * BOHR_TO_ANGSTROM
+            if rho_flat.size == 0 or coords_flat_ang.shape[0] != rho_flat.size:
+                out["status_reason"] = "density_or_coordinate_shape_mismatch"
+                return out
+
+            positive_mask = np.isfinite(rho_flat) & (rho_flat > 0.0)
+            if not np.any(positive_mask):
+                out["status_reason"] = "density_all_zero"
+                return out
+
+            rho_pos = rho_flat[positive_mask]
+            coords_pos = coords_flat_ang[positive_mask]
+            total_mass = float(np.sum(rho_pos))
+            if not np.isfinite(total_mass) or total_mass <= eps:
+                out["status_reason"] = "density_mass_non_positive"
+                return out
+
+            # Sort by density descending, keep top points until reaching mass cutoff.
+            order = np.argsort(rho_pos)[::-1]
+            rho_sorted = rho_pos[order]
+            coords_sorted = coords_pos[order]
+            target_mass = float(np.clip(mass_cutoff, 0.0, 1.0) * total_mass)
+            cumulative = np.cumsum(rho_sorted)
+            cutoff_idx = int(np.searchsorted(cumulative, target_mass, side="left"))
+            n_selected = max(1, min(rho_sorted.size, cutoff_idx + 1))
+
+            sel_rho = rho_sorted[:n_selected]
+            sel_coords = coords_sorted[:n_selected]
+            mass_sel = float(np.sum(sel_rho))
+            out["n_points_selected"] = int(n_selected)
+            out["selected_density_fraction"] = float(mass_sel / (total_mass + eps))
+
+            # Weighted center and covariance.
+            center = np.average(sel_coords, axis=0, weights=sel_rho)
+            centered = sel_coords - center
+            cov = (centered * sel_rho[:, None]).T @ centered / (mass_sel + eps)
+            cov = 0.5 * (cov + cov.T)
+            eig = np.linalg.eigvalsh(cov)
+            eig = np.sort(np.clip(np.asarray(eig, dtype=float), 0.0, None))[::-1]
+            if eig.size != 3:
+                out["status_reason"] = "eigenvalue_decomposition_failed"
+                return out
+
+            l1, l2, l3 = float(eig[0]), float(eig[1]), float(eig[2])
+            lsum = l1 + l2 + l3
+            eig_norm = np.asarray([l1, l2, l3], dtype=float) / (lsum + eps)
+
+            sphericity = 3.0 * l3 / (lsum + eps)
+            asphericity = (l1 - 0.5 * (l2 + l3)) / (lsum + eps)
+            anisotropy = (
+                (l1 - l2) ** 2 + (l2 - l3) ** 2 + (l3 - l1) ** 2
+            ) / (2.0 * (lsum ** 2) + eps)
+            elongation = (l1 - l2) / (l1 + eps)
+            planarity = (l2 - l3) / (l1 + eps)
+
+            out["center_of_mass_angstrom"] = [float(center[0]), float(center[1]), float(center[2])]
+            out["eigenvalues_raw"] = [l1, l2, l3]
+            out["eigenvalues_normalized"] = [float(eig_norm[0]), float(eig_norm[1]), float(eig_norm[2])]
+            out["sphericity"] = float(np.clip(sphericity, 0.0, 1.0))
+            out["asphericity"] = float(max(0.0, asphericity))
+            out["anisotropy"] = float(max(0.0, anisotropy))
+            out["elongation"] = float(max(0.0, elongation))
+            out["planarity"] = float(max(0.0, planarity))
+            out["status"] = "success"
+            out["status_reason"] = "ok"
+            return out
+        except Exception as e:
+            out["status"] = "unavailable"
+            out["status_reason"] = f"density_shape_descriptor_exception:{e}"
+            return out
+
     def _compute_sphericity(self, mask: np.ndarray, coords_3d: np.ndarray) -> float:
         """
         计算 sphericity-like descriptor

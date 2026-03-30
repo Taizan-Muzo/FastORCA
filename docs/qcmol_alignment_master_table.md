@@ -62,3 +62,14 @@ For operational pass/fail gating, combine this report with:
 - `docs/qcmol_operational_checklist.md`
 
 This keeps runtime health checks, master-table counts, and partial-tail explanations in one operator path.
+
+## Latest Alignment Enhancement Note
+
+- `molecule_size` remains `implemented_proxy` with expanded substitute family companions:
+  - `heavy_atom_count_proxy`
+  - `total_atom_count_proxy`
+  - `num_bonds_proxy`
+  - `num_rings_proxy`
+- `sphericity_parameters` remains `implemented_proxy` and now maps to:
+  - `realspace_features.density_shape_descriptor_family_v1.sphericity`
+  - legacy `density_sphericity_like` remains for backward compatibility.

@@ -95,11 +95,15 @@ class UnifiedOutputBuilder:
                     "dipole_moment": {"mapped_path": "global_features.dft.dipole_moment_debye", "status": "implemented_exact"},
                     "isosurface_area": {"mapped_path": "realspace_features.density_isosurface_area", "status": "implemented_exact"},
                     "isosurface_volume": {"mapped_path": "realspace_features.density_isosurface_volume", "status": "implemented_exact"},
-                    "sphericity_parameters": {"mapped_path": "realspace_features.density_sphericity_like", "status": "implemented_proxy"},
+                    "sphericity_parameters": {
+                        "mapped_path": "realspace_features.density_shape_descriptor_family_v1.sphericity",
+                        "status": "implemented_proxy",
+                        "notes": "Frozen substitute semantics: density shape descriptor family v1; legacy density_sphericity_like kept for backward compatibility.",
+                    },
                     "molecule_size": {
                         "mapped_path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
                         "status": "implemented_proxy",
-                        "notes": "Frozen substitute semantics: 3D bounding-box diagonal from geometry coordinates (not exact qcMol size definition).",
+                        "notes": "Frozen substitute semantics: bbox-diagonal primary with companion size proxies (heavy_atom_count/total_atom_count/num_bonds/num_rings).",
                     },
                     "molecular_weight": {"mapped_path": "global_features.rdkit.molecular_weight", "status": "implemented_exact"},
                     "ionization_affinity_or_related": {
@@ -209,7 +213,10 @@ class UnifiedOutputBuilder:
                 },
                 "geometry_size": {
                     "bounding_box_diagonal_angstrom": None,
-                    "heavy_atom_count_proxy": None
+                    "heavy_atom_count_proxy": None,
+                    "total_atom_count_proxy": None,
+                    "num_bonds_proxy": None,
+                    "num_rings_proxy": None,
                 },
                 "basin_proxy_summary_v1": {
                     "available": False,
@@ -336,18 +343,21 @@ class UnifiedOutputBuilder:
                         "implementation_status": "implemented_proxy",
                         "is_proxy": True,
                         "source": "realspace_density_shape_proxy",
+                        "canonical_successor": "realspace_features.density_shape_descriptor_family_v1.sphericity",
                         "limitations": [
                             "proxy shape descriptor; not a paper-exact sphericity index"
                         ]
                     },
                     "molecule_size_bounding_box_diagonal_angstrom": {
                         "canonical_path": "global_features.geometry_size.bounding_box_diagonal_angstrom",
-                        "definition_version": "v1",
+                        "definition_version": "v2",
                         "units": "angstrom",
                         "formula": "sqrt((x_max-x_min)^2 + (y_max-y_min)^2 + (z_max-z_min)^2)",
                         "implementation_status": "implemented_proxy",
                         "is_proxy": True,
                         "source": "geometry.atom_coords_angstrom",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_computed_yet",
                         "limitations": [
                             "orientation-dependent geometric extent",
                             "not equivalent to exact qcMol molecule-size definition"
@@ -355,13 +365,58 @@ class UnifiedOutputBuilder:
                     },
                     "molecule_size_heavy_atom_count_proxy": {
                         "canonical_path": "global_features.geometry_size.heavy_atom_count_proxy",
-                        "definition_version": "v1",
+                        "definition_version": "v2",
                         "units": "count",
+                        "formula": "prefer rdkit.heavy_atom_count else count(symbol != 'H') from geometry.atom_symbols",
                         "implementation_status": "implemented_proxy",
                         "is_proxy": True,
                         "source": "rdkit_heavy_atom_count_or_geometry_symbols",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_computed_yet",
                         "limitations": [
                             "topology/count proxy, not a 3D size metric"
+                        ]
+                    },
+                    "molecule_size_total_atom_count_proxy": {
+                        "canonical_path": "global_features.geometry_size.total_atom_count_proxy",
+                        "definition_version": "v2",
+                        "units": "count",
+                        "formula": "prefer molecule_info.natm else len(geometry.atom_symbols)",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "molecule_info_natm_or_geometry_symbols",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_computed_yet",
+                        "limitations": [
+                            "count proxy, not a direct physical size metric"
+                        ]
+                    },
+                    "molecule_size_num_bonds_proxy": {
+                        "canonical_path": "global_features.geometry_size.num_bonds_proxy",
+                        "definition_version": "v2",
+                        "units": "count",
+                        "formula": "prefer len(bond_features.bond_indices) else rdkit.GetNumBonds()",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "bond_indices_or_rdkit_bond_count",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_computed_yet",
+                        "limitations": [
+                            "depends on bond topology availability/alignment in current run"
+                        ]
+                    },
+                    "molecule_size_num_rings_proxy": {
+                        "canonical_path": "global_features.geometry_size.num_rings_proxy",
+                        "definition_version": "v2",
+                        "units": "count",
+                        "formula": "rdkit ring_info.NumRings()",
+                        "implementation_status": "implemented_proxy",
+                        "is_proxy": True,
+                        "source": "rdkit_ring_info",
+                        "availability_status": "not_attempted",
+                        "status_reason": "not_computed_yet",
+                        "limitations": [
+                            "null when RDKit topology is unavailable"
                         ]
                     },
                     "molecular_weight_g_mol": {
@@ -1007,6 +1062,7 @@ class UnifiedOutputBuilder:
                 "density_isosurface_volume": None,
                 "density_isosurface_area": None,
                 "density_sphericity_like": None,
+                "density_shape_descriptor_family_v1": None,
                 "esp_extrema_summary": None,
                 "orbital_extent_homo": None,
                 "orbital_extent_lumo": None,
@@ -1037,6 +1093,29 @@ class UnifiedOutputBuilder:
                     "realspace_extended_features_status": None,
                     "realspace_extended_failure_reason": None,
                     "stage_timing_seconds": None,
+                    "density_shape_descriptor_family_v1": {
+                        "definition_version": "v1",
+                        "is_proxy": True,
+                        "proxy_family": "density_shape_descriptor_family",
+                        "mass_cutoff_default": 0.95,
+                        "eps": 1e-12,
+                        "coordinate_source": "realspace density cube grid",
+                        "weight_definition": "density_value",
+                        "covariance_definition": "weighted covariance over selected mass-cutoff points",
+                        "eigenvalue_order": "lambda1>=lambda2>=lambda3>=0",
+                        "normalization_rule": "lambda_i_norm = lambda_i / (lambda1 + lambda2 + lambda3 + eps)",
+                        "formula_sphericity": "3*lambda3/(lambda1+lambda2+lambda3+eps)",
+                        "formula_asphericity": "(lambda1 - 0.5*(lambda2+lambda3))/(lambda1+lambda2+lambda3+eps)",
+                        "formula_anisotropy": "((lambda1-lambda2)^2 + (lambda2-lambda3)^2 + (lambda3-lambda1)^2)/(2*(lambda1+lambda2+lambda3)^2+eps)",
+                        "formula_elongation": "(lambda1 - lambda2)/(lambda1 + eps)",
+                        "formula_planarity": "(lambda2 - lambda3)/(lambda1 + eps)",
+                        "limitations": [
+                            "open-source substitute descriptor family; not qcMol exact internal formula",
+                            "depends on cube grid resolution/margin and mass_cutoff setting",
+                        ],
+                        "status": "not_attempted",
+                        "status_reason": "not_computed_yet",
+                    },
                     "extraction_status": None,
                     "failure_reason": None,
                     "extraction_time_seconds": None,
