@@ -33,6 +33,7 @@ These are the default recommended dependencies.
 - `global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree` (`implemented_proxy`, stable)
 - `global_features.rdkit.molecular_weight` (`implemented_exact`, stable)
 - `global_features.geometry_size.bounding_box_diagonal_angstrom` (`implemented_proxy`, stable)
+- `global_features.geometry_size.radius_of_gyration_angstrom` (`implemented_proxy`, stable)
 - `global_features.geometry_size.heavy_atom_count_proxy` (`implemented_proxy`, stable)
 - `global_features.geometry_size.total_atom_count_proxy` (`implemented_proxy`, stable)
 - `global_features.geometry_size.num_bonds_proxy` (`implemented_proxy`, stable)
@@ -68,10 +69,16 @@ These are the default recommended dependencies.
 - `realspace_features.density_isosurface_area` (`implemented_exact`, stable)
 - `realspace_features.density_isosurface_volume` (`implemented_exact`, stable)
 - `realspace_features.density_shape_descriptor_family_v1` (`implemented_proxy`, stable)
+- `realspace_features.density_shape_multiscale_family_v1` (`implemented_proxy`, stable)
 - `realspace_features.density_sphericity_like` (`implemented_proxy`, stable)
 - `realspace_features.esp_extrema_summary` (`implemented_proxy`, stable)
 - `realspace_features.orbital_extent_homo` (`implemented_exact`, stable)
 - `realspace_features.orbital_extent_lumo` (`implemented_exact`, stable)
+
+Descriptor semantics note:
+- raw eigenvalues are size-sensitive; normalized eigenvalues and `relative_anisotropy_kappa2` are shape-relative.
+- multiscale cutoff semantics are fixed to `0.50/0.90/0.95` (dense core / intermediate shell / near-complete cloud).
+- descriptors are mass-cutoff selected density descriptors, not threshold-mask-only descriptors.
 
 ### external_features / bridge
 - `external_bridge.critic2` (`implemented_exact`, stable)
@@ -96,12 +103,14 @@ For Bader volume, current dominant reason is upstream critic2 volume column abse
 | `global_features.dft.homo_lumo_gap_hartree` | implemented_exact | stable | yes | green |
 | `global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree` | implemented_proxy | stable | yes | yellow |
 | `global_features.geometry_size.bounding_box_diagonal_angstrom` | implemented_proxy | stable | yes | yellow |
+| `global_features.geometry_size.radius_of_gyration_angstrom` | implemented_proxy | stable | yes | yellow |
 | `global_features.geometry_size.total_atom_count_proxy` | implemented_proxy | stable | yes | yellow |
 | `global_features.geometry_size.num_bonds_proxy` | implemented_proxy | stable | yes | yellow |
 | `atom_features.atomic_density_partition_charge_proxy.bader` | implemented_proxy | stable | yes | yellow |
 | `bond_features.bond_orders_mayer` | implemented_proxy | stable | yes | yellow |
 | `structural_features.optimized_3d_geometry` | implemented_proxy | stable | yes | yellow |
 | `realspace_features.density_shape_descriptor_family_v1.sphericity` | implemented_proxy | stable | yes | yellow |
+| `realspace_features.density_shape_multiscale_family_v1` | implemented_proxy | stable | yes | yellow |
 | `atom_features.atomic_density_partition_volume_proxy.bader` | partial | caution | no | red |
 | `external_bridge_roadmap.atom_level.nao_descriptors` | rejected_as_exact | optional | no | red |
 

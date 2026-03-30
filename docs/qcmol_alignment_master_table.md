@@ -66,10 +66,12 @@ This keeps runtime health checks, master-table counts, and partial-tail explanat
 ## Latest Alignment Enhancement Note
 
 - `molecule_size` remains `implemented_proxy` with expanded substitute family companions:
+  - `radius_of_gyration_angstrom`
   - `heavy_atom_count_proxy`
   - `total_atom_count_proxy`
   - `num_bonds_proxy`
   - `num_rings_proxy`
 - `sphericity_parameters` remains `implemented_proxy` and now maps to:
   - `realspace_features.density_shape_descriptor_family_v1.sphericity`
+  - multiscale companion: `realspace_features.density_shape_multiscale_family_v1` (`0.50/0.90/0.95`)
   - legacy `density_sphericity_like` remains for backward compatibility.

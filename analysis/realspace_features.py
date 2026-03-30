@@ -55,6 +55,7 @@ DEFAULT_CUBE_CONFIG = {
     "density_isovalue": 0.001,  # e/Bohr^3
     "orbital_isovalue": 0.05,   # 用于可视化，不用于 extent 计算
     "density_shape_mass_cutoff": 0.95,
+    "density_shape_multiscale_cutoffs": [0.5, 0.9, 0.95],
     "density_shape_eps": 1e-12,
     "output_directory": "cubes/"
 }
@@ -278,6 +279,7 @@ class RealspaceFeatureExtractor:
                 result["metadata"]["wavefunction_signature"] = compatibility.get("wavefunction_signature")
                 result["metadata"]["feature_compatibility_key"] = compatibility.get("feature_compatibility_key")
                 result["metadata"]["artifact_compatibility_key"] = compatibility.get("artifact_compatibility_key")
+                result["metadata"]["density_source_state_key"] = compatibility.get("feature_compatibility_key")
             result["metadata"]["cache_reuse_mode"] = cache_mode
             result["metadata"]["cache_hit"] = cache_mode in ("exact_feature_reuse", "artifact_reuse")
             if isinstance(reused_artifacts, dict):
@@ -546,6 +548,7 @@ class RealspaceFeatureExtractor:
             "density_isosurface_area": None,
             "density_sphericity_like": None,
             "density_shape_descriptor_family_v1": None,
+            "density_shape_multiscale_family_v1": None,
             "esp_extrema_summary": None,
             "orbital_extent_homo": None,
             "orbital_extent_lumo": None,
@@ -566,10 +569,17 @@ class RealspaceFeatureExtractor:
                 "orbital_isovalue": self.config["orbital_isovalue"],
                 "cube_grid_shape": None,
                 "cube_spacing_angstrom": None,
+                "density_grid_resolution_angstrom": float(self.config.get("grid_resolution_angstrom", 0.2)),
+                "margin_angstrom": float(self.config.get("margin_angstrom", 4.0)),
                 "geometry_electronic_state_key": None,
                 "wavefunction_signature": None,
                 "feature_compatibility_key": None,
                 "artifact_compatibility_key": None,
+                "density_source_method": "pyscf_numint.eval_rho",
+                "density_source_family": "scf_density_grid",
+                "density_source_artifact_path": None,
+                "density_source_wavefunction_dependency": "requires_converged_scf_wavefunction_and_density_matrix",
+                "density_source_state_key": None,
                 "cache_reuse_mode": "no_reuse",  # exact_feature_reuse | artifact_reuse | no_reuse
                 "cache_hit": False,
                 "cache_entry_id": None,
@@ -605,11 +615,42 @@ class RealspaceFeatureExtractor:
                     "formula_sphericity": "3*lambda3/(lambda1+lambda2+lambda3+eps)",
                     "formula_asphericity": "(lambda1 - 0.5*(lambda2+lambda3))/(lambda1+lambda2+lambda3+eps)",
                     "formula_anisotropy": "((lambda1-lambda2)^2 + (lambda2-lambda3)^2 + (lambda3-lambda1)^2)/(2*(lambda1+lambda2+lambda3)^2+eps)",
+                    "formula_relative_anisotropy_kappa2": "1 - 3*(lambda1n*lambda2n + lambda2n*lambda3n + lambda3n*lambda1n), lambda_in = lambda_i/(lambda1+lambda2+lambda3+eps)",
                     "formula_elongation": "(lambda1-lambda2)/(lambda1+eps)",
                     "formula_planarity": "(lambda2-lambda3)/(lambda1+eps)",
+                    "normalization_notes": "raw eigenvalues keep absolute size scale; normalized eigenvalues and kappa2 emphasize relative shape",
                     "limitations": [
                         "open-source substitute descriptor family; not qcMol exact internal formula",
                         "depends on grid resolution/margin and mass cutoff configuration",
+                    ],
+                    "status": "not_attempted",
+                    "status_reason": "not_computed_yet",
+                },
+                "density_shape_multiscale_family_v1": {
+                    "definition_version": "v1",
+                    "is_proxy": True,
+                    "proxy_family": "density_shape_multiscale_family",
+                    "default_scale": float(self.config.get("density_shape_mass_cutoff", 0.95)),
+                    "available_scales": [float(x) for x in self._normalize_density_shape_scales(
+                        self.config.get("density_shape_multiscale_cutoffs"),
+                        float(self.config.get("density_shape_mass_cutoff", 0.95)),
+                    )],
+                    "eps": float(self.config.get("density_shape_eps", 1e-12)),
+                    "coordinate_source": "realspace density cube grid",
+                    "weight_definition": "density_value",
+                    "covariance_definition": "weighted covariance over per-scale mass-cutoff selected density points",
+                    "eigenvalue_order": "lambda1>=lambda2>=lambda3>=0",
+                    "normalization_rule": "lambda_i_norm = lambda_i / (lambda1 + lambda2 + lambda3 + eps)",
+                    "formula_sphericity": "3*lambda3/(lambda1+lambda2+lambda3+eps)",
+                    "formula_asphericity": "(lambda1 - 0.5*(lambda2+lambda3))/(lambda1+lambda2+lambda3+eps)",
+                    "formula_anisotropy": "((lambda1-lambda2)^2 + (lambda2-lambda3)^2 + (lambda3-lambda1)^2)/(2*(lambda1+lambda2+lambda3)^2+eps)",
+                    "formula_relative_anisotropy_kappa2": "1 - 3*(lambda1n*lambda2n + lambda2n*lambda3n + lambda3n*lambda1n)",
+                    "formula_elongation": "(lambda1-lambda2)/(lambda1+eps)",
+                    "formula_planarity": "(lambda2-lambda3)/(lambda1+eps)",
+                    "scale_semantics": "0.50/0.90/0.95 correspond to dense core, intermediate shell, and near-complete cloud coverage",
+                    "limitations": [
+                        "open-source substitute descriptor family; not qcMol exact internal formula",
+                        "cross-scale values depend on shared grid resolution/margin and mass-cutoff definitions",
                     ],
                     "status": "not_attempted",
                     "status_reason": "not_computed_yet",
@@ -733,19 +774,53 @@ class RealspaceFeatureExtractor:
             }
             
             # === 3. Density shape descriptor family (mass-cutoff weighted) ===
-            shape_family = self._compute_density_shape_descriptor_family(
+            density_shape_eps = float(self.config.get("density_shape_eps", 1e-12))
+            default_scale = float(self.config.get("density_shape_mass_cutoff", 0.95))
+            multiscale_scales = self._normalize_density_shape_scales(
+                self.config.get("density_shape_multiscale_cutoffs"),
+                default_scale,
+            )
+            multiscale_family = self._compute_density_shape_multiscale_family(
                 rho_3d=rho_3d,
                 coords_3d_bohr=coords_3d_bohr,
-                mass_cutoff=float(self.config.get("density_shape_mass_cutoff", 0.95)),
-                eps=float(self.config.get("density_shape_eps", 1e-12)),
+                scales=multiscale_scales,
+                default_scale=default_scale,
+                eps=density_shape_eps,
             )
+            result["density_shape_multiscale_family_v1"] = multiscale_family
+
+            default_scale_key = str(multiscale_family.get("default_scale_key", f"{default_scale:.2f}"))
+            shape_family = None
+            if isinstance(multiscale_family.get("scales"), dict):
+                candidate = multiscale_family["scales"].get(default_scale_key)
+                if isinstance(candidate, dict):
+                    shape_family = dict(candidate)
+            if not isinstance(shape_family, dict):
+                shape_family = self._compute_density_shape_descriptor_family(
+                    rho_3d=rho_3d,
+                    coords_3d_bohr=coords_3d_bohr,
+                    mass_cutoff=default_scale,
+                    eps=density_shape_eps,
+                )
             result["density_shape_descriptor_family_v1"] = shape_family
+
             shape_meta = result["metadata"].get("density_shape_descriptor_family_v1", {})
             shape_meta["status"] = str(shape_family.get("status", "unavailable"))
             shape_meta["status_reason"] = str(shape_family.get("status_reason", "unknown"))
             shape_meta["mass_cutoff_default"] = float(shape_family.get("mass_cutoff", self.config.get("density_shape_mass_cutoff", 0.95)))
             shape_meta["eps"] = float(shape_family.get("eps", self.config.get("density_shape_eps", 1e-12)))
+            shape_meta["canonical_successor"] = f"realspace_features.density_shape_multiscale_family_v1.scales.{default_scale_key}"
             result["metadata"]["density_shape_descriptor_family_v1"] = shape_meta
+            multiscale_meta = result["metadata"].get("density_shape_multiscale_family_v1", {})
+            multiscale_meta["status"] = str(multiscale_family.get("status", "unavailable"))
+            multiscale_meta["status_reason"] = str(multiscale_family.get("status_reason", "unknown"))
+            multiscale_meta["default_scale"] = float(multiscale_family.get("default_scale", default_scale))
+            multiscale_meta["available_scales"] = multiscale_scales
+            multiscale_meta["eps"] = density_shape_eps
+            multiscale_meta["normalization_notes"] = "raw eigenvalues are size-sensitive; normalized eigenvalues and kappa2 support shape-only cross-molecule comparison"
+            multiscale_meta["comparison_notes"] = "0.50 captures dense core, 0.90 captures intermediate shell, 0.95 captures near-complete electron cloud"
+            multiscale_meta["canonical_single_scale_view"] = "realspace_features.density_shape_descriptor_family_v1"
+            result["metadata"]["density_shape_multiscale_family_v1"] = multiscale_meta
 
             # === 4. Legacy compatibility field density_sphericity_like ===
             # Compatibility strategy A: keep old field but derive from new family.
@@ -828,6 +903,13 @@ class RealspaceFeatureExtractor:
         
         # 更新 metadata
         result["metadata"]["cube_spacing_angstrom"] = [self.config["grid_resolution_angstrom"]] * 3
+        result["metadata"]["density_grid_resolution_angstrom"] = float(self.config["grid_resolution_angstrom"])
+        result["metadata"]["margin_angstrom"] = float(self.config["margin_angstrom"])
+        result["metadata"]["density_source_method"] = "pyscf_numint.eval_rho"
+        result["metadata"]["density_source_family"] = "scf_density_grid"
+        density_artifact = result.get("artifacts", {}).get("cube_files", {}).get("density")
+        result["metadata"]["density_source_artifact_path"] = density_artifact.get("path") if isinstance(density_artifact, dict) else None
+        result["metadata"]["density_source_wavefunction_dependency"] = "depends_on_scf_wavefunction_and_density_matrix_rdm1"
         return stage_timing
     
     def _generate_uniform_grid(
@@ -858,6 +940,74 @@ class RealspaceFeatureExtractor:
         coords = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1)
         
         return coords
+
+    def _normalize_density_shape_scales(self, scales: Any, default_scale: float) -> List[float]:
+        """Normalize configured density-shape scales into sorted unique floats in (0, 1]."""
+        parsed: List[float] = []
+        if isinstance(scales, (list, tuple)):
+            for x in scales:
+                try:
+                    v = float(x)
+                    if 0.0 < v <= 1.0:
+                        parsed.append(v)
+                except Exception:
+                    continue
+        if not parsed:
+            parsed = [0.50, 0.90, float(default_scale)]
+        parsed.append(float(default_scale))
+        uniq = sorted({round(v, 6) for v in parsed})
+        return [float(v) for v in uniq]
+
+    def _compute_density_shape_multiscale_family(
+        self,
+        rho_3d: np.ndarray,
+        coords_3d_bohr: np.ndarray,
+        scales: List[float],
+        default_scale: float,
+        eps: float = 1e-12,
+    ) -> Dict[str, Any]:
+        """Compute multiscale density-shape family over several mass cutoffs."""
+        scale_values = self._normalize_density_shape_scales(scales, default_scale)
+        out: Dict[str, Any] = {
+            "default_scale": float(default_scale),
+            "default_scale_key": f"{float(default_scale):.2f}",
+            "scales": {},
+            "status": "unavailable",
+            "status_reason": "not_computed",
+        }
+
+        success_count = 0
+        reasons: List[str] = []
+        for s in scale_values:
+            key = f"{float(s):.2f}"
+            fam = self._compute_density_shape_descriptor_family(
+                rho_3d=rho_3d,
+                coords_3d_bohr=coords_3d_bohr,
+                mass_cutoff=float(s),
+                eps=eps,
+            )
+            out["scales"][key] = fam
+            if str(fam.get("status")) == "success":
+                success_count += 1
+            else:
+                reasons.append(str(fam.get("status_reason") or "unknown"))
+
+        default_key = f"{float(default_scale):.2f}"
+        if default_key not in out["scales"] and out["scales"]:
+            default_key = sorted(out["scales"].keys())[-1]
+        out["default_scale_key"] = default_key
+
+        default_fam = out["scales"].get(default_key) if isinstance(out.get("scales"), dict) else None
+        if isinstance(default_fam, dict) and str(default_fam.get("status")) == "success":
+            out["status"] = "success"
+            out["status_reason"] = "ok"
+        elif success_count > 0:
+            out["status"] = "partial"
+            out["status_reason"] = "default_scale_unavailable_but_other_scales_available"
+        else:
+            out["status"] = "unavailable"
+            out["status_reason"] = reasons[0] if reasons else "all_scales_unavailable"
+        return out
     
     def _compute_voxel_face_area(self, mask: np.ndarray, res_bohr: float) -> float:
         """
@@ -905,9 +1055,11 @@ class RealspaceFeatureExtractor:
             "center_of_mass_angstrom": None,
             "eigenvalues_raw": None,
             "eigenvalues_normalized": None,
+            "shape_tensor": None,
             "sphericity": None,
             "asphericity": None,
             "anisotropy": None,
+            "relative_anisotropy_kappa2": None,
             "elongation": None,
             "planarity": None,
             "status": "unavailable",
@@ -962,21 +1114,25 @@ class RealspaceFeatureExtractor:
             l1, l2, l3 = float(eig[0]), float(eig[1]), float(eig[2])
             lsum = l1 + l2 + l3
             eig_norm = np.asarray([l1, l2, l3], dtype=float) / (lsum + eps)
+            l1n, l2n, l3n = float(eig_norm[0]), float(eig_norm[1]), float(eig_norm[2])
 
             sphericity = 3.0 * l3 / (lsum + eps)
             asphericity = (l1 - 0.5 * (l2 + l3)) / (lsum + eps)
             anisotropy = (
                 (l1 - l2) ** 2 + (l2 - l3) ** 2 + (l3 - l1) ** 2
             ) / (2.0 * (lsum ** 2) + eps)
+            kappa2 = 1.0 - 3.0 * ((l1n * l2n) + (l2n * l3n) + (l3n * l1n))
             elongation = (l1 - l2) / (l1 + eps)
             planarity = (l2 - l3) / (l1 + eps)
 
             out["center_of_mass_angstrom"] = [float(center[0]), float(center[1]), float(center[2])]
             out["eigenvalues_raw"] = [l1, l2, l3]
             out["eigenvalues_normalized"] = [float(eig_norm[0]), float(eig_norm[1]), float(eig_norm[2])]
+            out["shape_tensor"] = np.asarray(cov, dtype=float).tolist()
             out["sphericity"] = float(np.clip(sphericity, 0.0, 1.0))
             out["asphericity"] = float(max(0.0, asphericity))
             out["anisotropy"] = float(max(0.0, anisotropy))
+            out["relative_anisotropy_kappa2"] = float(np.clip(kappa2, 0.0, 1.0))
             out["elongation"] = float(max(0.0, elongation))
             out["planarity"] = float(max(0.0, planarity))
             out["status"] = "success"
@@ -1136,6 +1292,29 @@ class RealspaceFeatureExtractor:
                 if not (0 <= sph["value"] <= 1):
                     logger.warning(f"Sphericity out of range: {sph['value']}")
                     return False
+
+            fam = data.get("density_shape_descriptor_family_v1")
+            if isinstance(fam, dict) and fam.get("status") == "success":
+                kappa2 = fam.get("relative_anisotropy_kappa2")
+                if kappa2 is not None and not (np.isfinite(kappa2) and 0.0 <= float(kappa2) <= 1.0 + 1e-9):
+                    logger.warning(f"relative_anisotropy_kappa2 out of range: {kappa2}")
+                    return False
+
+            multiscale = data.get("density_shape_multiscale_family_v1")
+            if isinstance(multiscale, dict) and isinstance(multiscale.get("scales"), dict):
+                for scale_key, scale_node in multiscale["scales"].items():
+                    if not isinstance(scale_node, dict) or scale_node.get("status") != "success":
+                        continue
+                    raw = scale_node.get("eigenvalues_raw")
+                    norm = scale_node.get("eigenvalues_normalized")
+                    if isinstance(raw, list) and len(raw) == 3:
+                        if not (float(raw[0]) + 1e-12 >= float(raw[1]) and float(raw[1]) + 1e-12 >= float(raw[2])):
+                            logger.warning(f"Multiscale eigenvalue order invalid @ {scale_key}: {raw}")
+                            return False
+                    if isinstance(norm, list) and len(norm) == 3:
+                        if not np.isfinite(sum(float(x) for x in norm)):
+                            logger.warning(f"Multiscale normalized eigenvalues invalid @ {scale_key}: {norm}")
+                            return False
             
             # 检查 orbital extent
             for key in ["orbital_extent_homo", "orbital_extent_lumo"]:
@@ -1219,6 +1398,11 @@ class RealspaceFeatureExtractor:
             **artifact_payload,
             "density_isovalue": float(self.config["density_isovalue"]),
             "orbital_isovalue": float(self.config["orbital_isovalue"]),
+            "density_shape_mass_cutoff": float(self.config.get("density_shape_mass_cutoff", 0.95)),
+            "density_shape_multiscale_cutoffs": self._normalize_density_shape_scales(
+                self.config.get("density_shape_multiscale_cutoffs"),
+                float(self.config.get("density_shape_mass_cutoff", 0.95)),
+            ),
             "core_enabled": bool(self.config.get("realspace_core_features_enabled", True)),
             "extended_enabled": bool(self.config.get("realspace_extended_features_enabled", True)),
         }

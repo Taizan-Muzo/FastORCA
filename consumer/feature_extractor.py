@@ -1866,6 +1866,7 @@ class FeatureExtractor:
                     density_isosurface_area=realspace_result.get("density_isosurface_area"),
                     density_sphericity_like=realspace_result.get("density_sphericity_like"),
                     density_shape_descriptor_family_v1=realspace_result.get("density_shape_descriptor_family_v1"),
+                    density_shape_multiscale_family_v1=realspace_result.get("density_shape_multiscale_family_v1"),
                     esp_extrema_summary=realspace_result.get("esp_extrema_summary"),
                     orbital_extent_homo=realspace_result.get("orbital_extent_homo"),
                     orbital_extent_lumo=realspace_result.get("orbital_extent_lumo"),
@@ -4398,14 +4399,18 @@ class FeatureExtractor:
         Update molecule_size substitute family (v2) with explicit source priority.
 
         Priority rules:
+        - radius_of_gyration_angstrom: geometry atom-point equal-weight compactness proxy
         - heavy_atom_count_proxy: rdkit.heavy_atom_count -> geometry symbols fallback
         - total_atom_count_proxy: molecule_info.natm -> geometry symbols fallback
         - num_bonds_proxy: len(bond_indices) -> rdkit.GetNumBonds() fallback
         - num_rings_proxy: rdkit ring count only (null when rdkit unavailable)
         """
         bbox_diag = self._compute_bounding_box_diagonal_angstrom(mol)
+        rg_ang = self._compute_radius_of_gyration_angstrom(mol)
         bbox_status = "success" if isinstance(bbox_diag, float) and bbox_diag >= 0.0 else "unavailable"
         bbox_reason = "ok" if bbox_status == "success" else "bbox_from_geometry_unavailable"
+        rg_status = "success" if isinstance(rg_ang, float) and rg_ang >= 0.0 else "unavailable"
+        rg_reason = "ok" if rg_status == "success" else "radius_of_gyration_from_geometry_unavailable"
 
         atom_symbols = builder.data.get("geometry", {}).get("atom_symbols")
         rdkit_heavy = builder.data.get("global_features", {}).get("rdkit", {}).get("heavy_atom_count")
@@ -4463,6 +4468,7 @@ class FeatureExtractor:
 
         builder.set_global_geometry_size(
             bounding_box_diagonal_angstrom=bbox_diag,
+            radius_of_gyration_angstrom=rg_ang,
             heavy_atom_count_proxy=(int(heavy_count) if heavy_count is not None else None),
             total_atom_count_proxy=(int(total_count) if total_count is not None else None),
             num_bonds_proxy=(int(num_bonds) if num_bonds is not None else None),
@@ -4482,6 +4488,13 @@ class FeatureExtractor:
             source=heavy_source,
             availability_status=("success" if heavy_count is not None else "unavailable"),
             status_reason=heavy_reason,
+        )
+        builder.set_global_metadata(
+            "molecule_size_radius_of_gyration_angstrom",
+            definition_version="v2",
+            source="geometry.atom_coords_angstrom_equal_weight",
+            availability_status=rg_status,
+            status_reason=rg_reason,
         )
         builder.set_global_metadata(
             "molecule_size_total_atom_count_proxy",
@@ -4519,6 +4532,24 @@ class FeatureExtractor:
             cmax = np.max(coords, axis=0)
             diag = float(np.linalg.norm(cmax - cmin))
             return diag
+        except Exception:
+            return None
+
+    def _compute_radius_of_gyration_angstrom(self, mol: gto.Mole) -> Optional[float]:
+        """
+        计算 geometry-based radius of gyration（angstrom）。
+        定义:
+        Rg = sqrt(mean(||r_i - r_center||^2))
+        其中 r_center 为等权原子坐标中心。
+        """
+        try:
+            coords = np.asarray(mol.atom_coords(unit='A'), dtype=float)
+            if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[1] != 3:
+                return None
+            center = np.mean(coords, axis=0)
+            dist2 = np.sum((coords - center) ** 2, axis=1)
+            rg = float(np.sqrt(np.mean(dist2)))
+            return rg
         except Exception:
             return None
     

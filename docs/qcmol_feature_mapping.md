@@ -21,8 +21,8 @@ For productized usage, prefer:
 | dipole moment | global_features | implemented_exact (`global_features.dft.dipole_moment_debye`) | existing code (PySCF) |
 | isosurface area | global_features | implemented_exact (`realspace_features.density_isosurface_area`) | existing code |
 | isosurface volume | global_features | implemented_exact (`realspace_features.density_isosurface_volume`) | existing code |
-| sphericity parameters | global_features | implemented_proxy (`realspace_features.density_shape_descriptor_family_v1.sphericity`, legacy alias: `realspace_features.density_sphericity_like`) | existing code (density shape family v1, mass-cutoff weighted) |
-| molecule size | global_features | implemented_proxy (`global_features.geometry_size.bounding_box_diagonal_angstrom` + size companions) | existing code (geometry + topology companion proxies) |
+| sphericity parameters | global_features | implemented_proxy (`realspace_features.density_shape_descriptor_family_v1.sphericity`, multiscale companion: `realspace_features.density_shape_multiscale_family_v1`, legacy alias: `realspace_features.density_sphericity_like`) | existing code (density shape family v1 + multiscale enhancement, mass-cutoff weighted) |
+| molecule size | global_features | implemented_proxy (`global_features.geometry_size.bounding_box_diagonal_angstrom` + size companions incl. `radius_of_gyration_angstrom`) | existing code (geometry + topology companion proxies) |
 | molecular weight | global_features | implemented_exact (`global_features.rdkit.molecular_weight`) | existing code (RDKit) |
 | ionization affinity / ionization-related quantity | global_features | implemented_proxy (`global_features.dft.ionization_related_proxy_v1.koopmans_ip_proxy_hartree`) | derived from HOMO (`IP_proxy = -E_HOMO`) |
 | charge | global_features | implemented_exact (`molecule_info.charge`) | existing code |
@@ -89,8 +89,10 @@ For productized usage, prefer:
 | isosurface area | `realspace_features.density_isosurface_area` | angstrom^2 | implemented_exact |
 | isosurface volume | `realspace_features.density_isosurface_volume` | angstrom^3 | implemented_exact |
 | sphericity (family primary) | `realspace_features.density_shape_descriptor_family_v1.sphericity` | dimensionless | implemented_proxy |
+| sphericity (multiscale family) | `realspace_features.density_shape_multiscale_family_v1` | object | implemented_proxy |
 | sphericity-like (legacy compatibility) | `realspace_features.density_sphericity_like` | dimensionless | implemented_proxy |
 | molecule size (primary) | `global_features.geometry_size.bounding_box_diagonal_angstrom` | angstrom | implemented_proxy |
+| molecule size (auxiliary) | `global_features.geometry_size.radius_of_gyration_angstrom` | angstrom | implemented_proxy |
 | molecule size (auxiliary) | `global_features.geometry_size.heavy_atom_count_proxy` | count | implemented_proxy |
 | molecule size (auxiliary) | `global_features.geometry_size.total_atom_count_proxy` | count | implemented_proxy |
 | molecule size (auxiliary) | `global_features.geometry_size.num_bonds_proxy` | count | implemented_proxy |
@@ -227,15 +229,23 @@ Frozen formulas/constraints:
 
 - molecule_size family (substitute):
   - `global_features.geometry_size.bounding_box_diagonal_angstrom`
+  - `global_features.geometry_size.radius_of_gyration_angstrom`
   - `global_features.geometry_size.heavy_atom_count_proxy`
   - `global_features.geometry_size.total_atom_count_proxy`
   - `global_features.geometry_size.num_bonds_proxy`
   - `global_features.geometry_size.num_rings_proxy`
 - density shape descriptor family:
   - `realspace_features.density_shape_descriptor_family_v1`
+  - `realspace_features.density_shape_multiscale_family_v1` (`0.50/0.90/0.95`)
+  - per-scale companion includes `relative_anisotropy_kappa2` and `shape_tensor` (weighted covariance tensor)
   - mass-cutoff weighted descriptors from density grid (not threshold-only mask)
+  - normalization semantics:
+    - raw eigenvalues are size-sensitive
+    - normalized eigenvalues + `relative_anisotropy_kappa2` are shape-relative for cross-size comparison
   - legacy compatibility field retained:
     - `realspace_features.density_sphericity_like` (derived/compatible successor path)
+- enhancement validation script:
+  - `scripts/density_shape_enhancement_validation.py`
 
 ## Consolidation Default Profile (v1)
 
