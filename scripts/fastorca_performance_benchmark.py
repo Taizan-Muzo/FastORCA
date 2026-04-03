@@ -380,13 +380,21 @@ def _prepare_runtime(profile_path: Path):
 
 def _build_dft_config(functional: str, basis: str, geometry_optimization: bool, geo_opt_method: str) -> Dict[str, Any]:
     return {
-        "functional": functional,
-        "basis": basis,
-        "verbose": 3,
-        "geometry_optimization": geometry_optimization,
-        "geo_opt_method": geo_opt_method,
-        "geometry_optimization_success": geometry_optimization,
-        "gpu_used": None,
+        "calculator_kwargs": {
+            "functional": functional,
+            "basis": basis,
+            "verbose": 3,
+            "geometry_optimization": geometry_optimization,
+            "geo_opt_method": geo_opt_method,
+        },
+        "extraction_context": {
+            "functional": functional,
+            "basis": basis,
+            "geometry_optimization": geometry_optimization,
+            "geo_opt_method": geo_opt_method,
+            "geometry_optimization_success": geometry_optimization,
+            "gpu_used": None,
+        },
     }
 
 
@@ -400,6 +408,8 @@ def run_serial_benchmark(
     from producer.dft_calculator import DFTCalculator
 
     profile, batch_kwargs, extractor = _prepare_runtime(profile_path)
+    calculator_kwargs = dict(dft_config.get("calculator_kwargs") or {})
+    extraction_dft_context = dict(dft_config.get("extraction_context") or {})
     processor = MoleculeProcessorConfig.from_dict(
         {
             "run_mode": batch_kwargs["run_mode"],
@@ -407,7 +417,7 @@ def run_serial_benchmark(
             "plugins": batch_kwargs["plugin_config"],
         }
     ).create_processor(extractor, output_dir)
-    calculator = DFTCalculator(**dft_config)
+    calculator = DFTCalculator(**calculator_kwargs)
     pkl_dir = output_dir / "pkl"
     pkl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,7 +458,7 @@ def run_serial_benchmark(
             pkl_path=Path(dft_result["pkl_path"]),
             molecule_id=molecule_id,
             smiles=smiles,
-            dft_config=dft_config,
+            dft_config=extraction_dft_context,
             return_data_mode="summary",
         )
         rows.append(
@@ -481,7 +491,9 @@ def run_parallel_consumer_benchmark(
     from producer.dft_calculator import DFTCalculator
 
     profile, batch_kwargs, extractor = _prepare_runtime(profile_path)
-    calculator = DFTCalculator(**dft_config)
+    calculator_kwargs = dict(dft_config.get("calculator_kwargs") or {})
+    extraction_dft_context = dict(dft_config.get("extraction_context") or {})
+    calculator = DFTCalculator(**calculator_kwargs)
     pkl_dir = output_dir / "pkl"
     pkl_dir.mkdir(parents=True, exist_ok=True)
     dft_rows: Dict[str, Dict[str, Any]] = {}
@@ -518,7 +530,7 @@ def run_parallel_consumer_benchmark(
                     "molecule_id": molecule_id,
                     "smiles": smiles,
                     "pkl_path": dft_result["pkl_path"],
-                    "dft_config": dft_config,
+                    "dft_config": extraction_dft_context,
                 }
             )
 
@@ -640,7 +652,9 @@ def _pipeline_producer_worker(
 ) -> None:
     from producer.dft_calculator import DFTCalculator
 
-    calculator = DFTCalculator(**dft_config)
+    calculator_kwargs = dict(dft_config.get("calculator_kwargs") or {})
+    extraction_dft_context = dict(dft_config.get("extraction_context") or {})
+    calculator = DFTCalculator(**calculator_kwargs)
     for item in molecules:
         molecule_id = item["molecule_id"]
         smiles = item["smiles"]
@@ -677,7 +691,7 @@ def _pipeline_producer_worker(
                     "molecule_id": molecule_id,
                     "smiles": smiles,
                     "pkl_path": dft_result["pkl_path"],
-                    "dft_config": dft_config,
+                    "dft_config": extraction_dft_context,
                     "dft_timing_seconds": dft_result.get("timing_seconds"),
                     "execution_backend": dft_result.get("execution_backend"),
                     "molecule_build_seconds": molecule_build_seconds,
