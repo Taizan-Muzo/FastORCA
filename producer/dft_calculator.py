@@ -82,6 +82,7 @@ class DFTCalculator:
         geometry_optimization: bool = True,
         geo_opt_method: str = "xtb", 
         geo_opt_maxsteps: int = 100,
+        gpu_device_id: Optional[int] = None,
     ):
         self.functional = functional
         self.basis = basis
@@ -91,11 +92,14 @@ class DFTCalculator:
         self.geometry_optimization = geometry_optimization
         self.geo_opt_method = geo_opt_method
         self.geo_opt_maxsteps = geo_opt_maxsteps
+        self.gpu_device_id = gpu_device_id
         self._last_run_sp_backend = None
         
         logger.info(f"DFTCalculator initialized: {functional}/{basis}")
         logger.info(f"GPU available: {GPU_AVAILABLE}")
         logger.info(f"Geometry optimization: {geometry_optimization} ({geo_opt_method})")
+        if self.gpu_device_id is not None:
+            logger.info(f"Preferred GPU device id: {self.gpu_device_id}")
         
         if geometry_optimization:
             # if geo_opt_method == "xtb" and not XTB_AVAILABLE:
@@ -106,6 +110,16 @@ class DFTCalculator:
             compatible, msg = check_basis_gpu_compatibility(basis)
             if not compatible:
                 logger.warning(msg)
+
+    def _activate_gpu_device(self) -> None:
+        if not GPU_AVAILABLE:
+            return
+        if self.gpu_device_id is None:
+            return
+        try:
+            cupy.cuda.Device(int(self.gpu_device_id)).use()
+        except Exception as e:
+            logger.warning(f"Failed to activate GPU device {self.gpu_device_id}: {e}")
     
     def from_smiles(
         self,
@@ -331,6 +345,8 @@ class DFTCalculator:
         from scipy.optimize import minimize
         from gpu4pyscf.dft import RKS as GPU_RKS
         import numpy as np
+
+        self._activate_gpu_device()
         
         logger.info(f"[{molecule_id}] 🚀 Switching to Hybrid Architecture: GPU SCF + CPU Gradient")
         
@@ -416,6 +432,7 @@ class DFTCalculator:
             if GPU_AVAILABLE:
                 logger.info(f"[{molecule_id}] Trying GPU acceleration...")
                 try:
+                    self._activate_gpu_device()
                     self._last_run_sp_backend = "gpu"
                     mf = GPU_RKS(mol_obj).density_fit(auxbasis='def2-svp-jkfit')
                     mf.xc = self.functional

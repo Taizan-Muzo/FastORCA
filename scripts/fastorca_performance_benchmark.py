@@ -128,6 +128,22 @@ def _load_molecules(input_path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _detect_gpu_count() -> int:
+    if shutil.which("nvidia-smi") is None:
+        return 0
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        return len(lines)
+    except Exception:
+        return 0
+
+
 class ResourceMonitor:
     def __init__(self, interval_seconds: float = 1.0):
         self.interval_seconds = max(0.2, float(interval_seconds))
@@ -648,12 +664,19 @@ def _pipeline_producer_worker(
     pkl_dir: str,
     task_queue: Any,
     result_queue: Any,
-    n_consumers: int,
+    gpu_device_id: Optional[int] = None,
 ) -> None:
     from producer.dft_calculator import DFTCalculator
 
     calculator_kwargs = dict(dft_config.get("calculator_kwargs") or {})
+    if gpu_device_id is not None:
+        calculator_kwargs["gpu_device_id"] = int(gpu_device_id)
     extraction_dft_context = dict(dft_config.get("extraction_context") or {})
+    extraction_dft_context["gpu_used"] = gpu_device_id
+    print(
+        f"[benchmark] pipeline producer start pid={os.getpid()} gpu_device_id={gpu_device_id} molecules={len(molecules)}",
+        flush=True,
+    )
     calculator = DFTCalculator(**calculator_kwargs)
     for item in molecules:
         molecule_id = item["molecule_id"]
@@ -711,9 +734,6 @@ def _pipeline_producer_worker(
                 }
             )
 
-    for _ in range(n_consumers):
-        task_queue.put(None)
-
 
 def run_pipeline_benchmark(
     molecules: List[Dict[str, Any]],
@@ -722,6 +742,7 @@ def run_pipeline_benchmark(
     dft_config: Dict[str, Any],
     n_consumers: int,
     queue_size: int,
+    n_gpu_producers: int,
 ) -> Dict[str, Any]:
     import multiprocessing as mp
 
@@ -739,11 +760,29 @@ def run_pipeline_benchmark(
     pkl_dir = output_dir / "pkl"
     pkl_dir.mkdir(parents=True, exist_ok=True)
 
-    producer = ctx.Process(
-        target=_pipeline_producer_worker,
-        args=(molecules, dft_config, str(pkl_dir), task_queue, result_queue, n_consumers),
-        name="FastORCA-GPU-Producer",
-    )
+    gpu_count = _detect_gpu_count()
+    n_producers = max(1, int(n_gpu_producers))
+    if gpu_count > 0:
+        n_producers = min(n_producers, len(molecules), gpu_count)
+    else:
+        n_producers = min(n_producers, len(molecules))
+
+    chunk_size = max(1, math.ceil(len(molecules) / max(1, n_producers)))
+    producers = []
+    for idx in range(n_producers):
+        start = idx * chunk_size
+        end = min(len(molecules), (idx + 1) * chunk_size)
+        chunk = molecules[start:end]
+        if not chunk:
+            continue
+        gpu_device_id = idx % gpu_count if gpu_count > 0 else None
+        producers.append(
+            ctx.Process(
+                target=_pipeline_producer_worker,
+                args=(chunk, dft_config, str(pkl_dir), task_queue, result_queue, gpu_device_id),
+                name=f"FastORCA-GPU-Producer-{idx}",
+            )
+        )
     consumers = [
         ctx.Process(
             target=_pipeline_consumer_worker,
@@ -756,7 +795,8 @@ def run_pipeline_benchmark(
     monitor = ResourceMonitor()
     monitor.start()
     total_start = time.time()
-    producer.start()
+    for producer in producers:
+        producer.start()
     for proc in consumers:
         proc.start()
 
@@ -764,14 +804,25 @@ def run_pipeline_benchmark(
     while len(rows) < len(molecules):
         rows.append(result_queue.get())
 
-    producer.join()
+    for producer in producers:
+        producer.join()
+    for _ in range(n_consumers):
+        task_queue.put(None)
     for proc in consumers:
         proc.join()
 
     total_wall = time.time() - total_start
     resource_summary = monitor.stop()
     outputs = _collect_unified_outputs(output_dir)
-    return _aggregate_result_rows("pipeline_overlap", total_wall, rows, resource_summary, outputs)
+    result = _aggregate_result_rows("pipeline_overlap", total_wall, rows, resource_summary, outputs)
+    result["pipeline_scheduler"] = {
+        "n_gpu_producers": len(producers),
+        "n_cpu_consumers": n_consumers,
+        "detected_gpu_count": gpu_count,
+        "queue_size": int(queue_size),
+        "molecule_chunk_size": int(chunk_size),
+    }
+    return result
 
 
 def write_report(report: Dict[str, Any], output_json: Path, output_md: Path) -> None:
@@ -811,6 +862,7 @@ def write_report(report: Dict[str, Any], output_json: Path, output_md: Path) -> 
 
 
 def parse_args() -> argparse.Namespace:
+    detected_gpu_count = _detect_gpu_count()
     p = argparse.ArgumentParser(description="FastORCA full-mode throughput benchmark")
     p.add_argument("--input-json", required=True, help="JSON list with molecule_id/smiles[/charge/spin]")
     p.add_argument("--output-dir", required=True, help="Benchmark output root")
@@ -820,6 +872,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--geo-opt-method", default="xtb", choices=["xtb", "pyscf", "none"])
     p.add_argument("--disable-geometry-optimization", action="store_true")
     p.add_argument("--n-consumer-workers", type=int, default=max(2, (os.cpu_count() or 4) // 2))
+    p.add_argument(
+        "--n-gpu-producers",
+        type=int,
+        default=max(1, detected_gpu_count or 1),
+        help="Number of GPU-side producer processes for pipeline mode",
+    )
     p.add_argument("--queue-size", type=int, default=8)
     p.add_argument(
         "--modes",
@@ -847,6 +905,8 @@ def main() -> None:
         "run_mode": "full",
         "molecule_count": len(molecules),
         "n_consumer_workers": args.n_consumer_workers,
+        "n_gpu_producers": args.n_gpu_producers,
+        "detected_gpu_count": _detect_gpu_count(),
         "queue_size": args.queue_size,
         "modes": args.modes,
     }
@@ -865,6 +925,7 @@ def main() -> None:
     results: Dict[str, Dict[str, Any]] = {}
 
     if "serial" in args.modes:
+        print("[benchmark] starting mode=serial_baseline", flush=True)
         results["serial"] = run_serial_benchmark(
             molecules=molecules,
             output_dir=output_dir / "serial",
@@ -873,6 +934,7 @@ def main() -> None:
         )
 
     if "parallel-consumer" in args.modes:
+        print("[benchmark] starting mode=parallel_consumer", flush=True)
         results["parallel-consumer"] = run_parallel_consumer_benchmark(
             molecules=molecules,
             output_dir=output_dir / "parallel_consumer",
@@ -882,6 +944,10 @@ def main() -> None:
         )
 
     if "pipeline" in args.modes:
+        print(
+            f"[benchmark] starting mode=pipeline_overlap n_gpu_producers={args.n_gpu_producers} n_cpu_consumers={args.n_consumer_workers}",
+            flush=True,
+        )
         results["pipeline"] = run_pipeline_benchmark(
             molecules=molecules,
             output_dir=output_dir / "pipeline",
@@ -889,6 +955,7 @@ def main() -> None:
             dft_config=dft_config,
             n_consumers=args.n_consumer_workers,
             queue_size=args.queue_size,
+            n_gpu_producers=args.n_gpu_producers,
         )
 
     comparisons: List[Dict[str, Any]] = []
