@@ -762,10 +762,9 @@ def run_pipeline_benchmark(
 
     gpu_count = _detect_gpu_count()
     n_producers = max(1, int(n_gpu_producers))
-    if gpu_count > 0:
-        n_producers = min(n_producers, len(molecules), gpu_count)
-    else:
-        n_producers = min(n_producers, len(molecules))
+    # Allow multiple producers per GPU. Small/medium molecules often under-utilize
+    # a single A800 stream, so benchmark mode should support oversubscription.
+    n_producers = min(n_producers, len(molecules))
 
     chunk_size = max(1, math.ceil(len(molecules) / max(1, n_producers)))
     producers = []
@@ -819,6 +818,9 @@ def run_pipeline_benchmark(
         "n_gpu_producers": len(producers),
         "n_cpu_consumers": n_consumers,
         "detected_gpu_count": gpu_count,
+        "producers_per_gpu": (
+            round(len(producers) / max(1, gpu_count), 3) if gpu_count > 0 else None
+        ),
         "queue_size": int(queue_size),
         "molecule_chunk_size": int(chunk_size),
     }
@@ -875,8 +877,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--n-gpu-producers",
         type=int,
-        default=max(1, detected_gpu_count or 1),
-        help="Number of GPU-side producer processes for pipeline mode",
+        default=max(1, (detected_gpu_count or 1) * 2),
+        help="Number of GPU-side producer processes for pipeline mode; may exceed GPU count for oversubscription",
     )
     p.add_argument("--queue-size", type=int, default=8)
     p.add_argument(
