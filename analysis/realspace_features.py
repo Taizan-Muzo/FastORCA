@@ -61,6 +61,49 @@ DEFAULT_CUBE_CONFIG = {
 }
 
 
+def _realspace_timeout_worker(
+    queue_obj: Any,
+    mol_dict: Dict[str, Any],
+    mf_dict: Dict[str, Any],
+    molecule_id: str,
+    output_dir: Optional[str],
+    config: Dict[str, Any],
+    compatibility: Dict[str, Any],
+    cache_mode: str,
+    reused_artifacts: Optional[Dict[str, Any]],
+) -> None:
+    """Module-level worker for spawn-safe realspace timeout execution."""
+    try:
+        mol_build_kwargs = dict(mol_dict)
+        mol_build_kwargs["verbose"] = 0
+        mol = gto.Mole()
+        mol.build(**mol_build_kwargs)
+
+        mf = dft.RKS(mol)
+        mf.verbose = 0
+        mf.mo_energy = mf_dict["mo_energy"]
+        mf.mo_coeff = mf_dict["mo_coeff"]
+        mf.mo_occ = mf_dict["mo_occ"]
+        mf.e_tot = mf_dict["e_tot"]
+        mf.converged = mf_dict["converged"]
+
+        extractor = RealspaceFeatureExtractor(config)
+        result = extractor._extract_cubes(
+            mol,
+            mf,
+            molecule_id,
+            output_dir,
+            extractor._init_realspace_features_skeleton(),
+            time.time(),
+            compatibility=compatibility,
+            cache_mode=cache_mode,
+            reused_artifacts=reused_artifacts,
+        )
+        queue_obj.put(("success", result))
+    except Exception as exc:
+        queue_obj.put(("error", str(exc)))
+
+
 class RealspaceFeatureExtractor:
     """
     实空间特征提取器
@@ -153,40 +196,8 @@ class RealspaceFeatureExtractor:
         reused_artifacts: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """使用子进程执行 cube 生成，带超时控制"""
-        from multiprocessing import Process, Queue
-        
-        queue = Queue()
-        
-        # 序列化必要的数据
-        def target(queue, mol_dict, mf_dict, molecule_id, output_dir, config, compatibility, cache_mode, reused_artifacts):
-            """子进程目标函数"""
-            try:
-                # 重建 mol 和 mf
-                mol_dict['verbose'] = 0  # M5: 静音
-                mol = gto.Mole()
-                mol.build(**mol_dict)
-                
-                mf = dft.RKS(mol)
-                mf.verbose = 0  # M5: 静音
-                mf.mo_energy = mf_dict['mo_energy']
-                mf.mo_coeff = mf_dict['mo_coeff']
-                mf.mo_occ = mf_dict['mo_occ']
-                mf.e_tot = mf_dict['e_tot']
-                mf.converged = mf_dict['converged']
-                
-                # 创建临时 extractor
-                extractor = RealspaceFeatureExtractor(config)
-                result = extractor._extract_cubes(
-                    mol, mf, molecule_id, output_dir,
-                    extractor._init_realspace_features_skeleton(),
-                    time.time(),
-                    compatibility=compatibility,
-                    cache_mode=cache_mode,
-                    reused_artifacts=reused_artifacts
-                )
-                queue.put(('success', result))
-            except Exception as e:
-                queue.put(('error', str(e)))
+        ctx = multiprocessing.get_context()
+        queue = ctx.Queue()
         
         # 准备序列化数据
         mol_dict = {
@@ -204,8 +215,8 @@ class RealspaceFeatureExtractor:
         }
         
         # 启动子进程
-        process = Process(
-            target=target,
+        process = ctx.Process(
+            target=_realspace_timeout_worker,
             args=(queue, mol_dict, mf_dict, molecule_id, output_dir, self.config, compatibility, cache_mode, reused_artifacts)
         )
         process.start()

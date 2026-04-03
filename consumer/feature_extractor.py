@@ -1965,7 +1965,7 @@ class FeatureExtractor:
             try:
                 # 检查是否有 density cube
                 cube_files = builder.data.get("artifacts", {}).get("cube_files", {})
-                density_cube = cube_files.get("density", {}).get("path")
+                density_cube = (cube_files.get("density") or {}).get("path")
                 
                 if density_cube and Path(density_cube).exists():
                     logger.info(f"[{molecule_id}] Running critic2 analysis...")
