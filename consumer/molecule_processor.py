@@ -111,6 +111,10 @@ class MoleculeProcessor:
             reason_codes = ["wavefunction_corrupted"]
             unified_data = self._build_error_data(molecule_id, smiles, str(e))
             metrics["error"] = str(e)
+
+        calc_status = unified_data.get("calculation_status")
+        if isinstance(calc_status, dict):
+            calc_status["overall_status"] = overall_status
         
         wall_time = time.time() - start_time
         metrics["processor_wall_time_seconds"] = wall_time

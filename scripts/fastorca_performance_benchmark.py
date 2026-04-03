@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import os
+import queue
 import shutil
 import statistics
 import subprocess
@@ -800,8 +801,27 @@ def run_pipeline_benchmark(
         proc.start()
 
     rows: List[Dict[str, Any]] = []
+    expected_ids = [item["molecule_id"] for item in molecules]
+    received_ids = set()
+    pipeline_errors: List[str] = []
     while len(rows) < len(molecules):
-        rows.append(result_queue.get())
+        try:
+            row = result_queue.get(timeout=5.0)
+            rows.append(row)
+            molecule_id = row.get("molecule_id")
+            if molecule_id:
+                received_ids.add(molecule_id)
+            continue
+        except queue.Empty:
+            live_producers = [proc for proc in producers if proc.is_alive()]
+            live_consumers = [proc for proc in consumers if proc.is_alive()]
+            if live_producers or live_consumers:
+                continue
+            pipeline_errors.append(
+                "pipeline_terminated_before_collecting_all_rows:"
+                f"missing={[mid for mid in expected_ids if mid not in received_ids]}"
+            )
+            break
 
     for producer in producers:
         producer.join()
@@ -813,6 +833,22 @@ def run_pipeline_benchmark(
     total_wall = time.time() - total_start
     resource_summary = monitor.stop()
     outputs = _collect_unified_outputs(output_dir)
+    if len(rows) < len(molecules):
+        missing_ids = [mid for mid in expected_ids if mid not in received_ids]
+        for molecule_id in missing_ids:
+            rows.append(
+                {
+                    "molecule_id": molecule_id,
+                    "overall_status": "benchmark_incomplete",
+                    "reason_codes": ["pipeline_incomplete"],
+                    "wall_time_seconds": None,
+                    "metrics": {"error": "pipeline_incomplete"},
+                    "dft_timing_seconds": None,
+                    "execution_backend": None,
+                    "molecule_build_seconds": None,
+                    "error": "pipeline_incomplete",
+                }
+            )
     result = _aggregate_result_rows("pipeline_overlap", total_wall, rows, resource_summary, outputs)
     result["pipeline_scheduler"] = {
         "n_gpu_producers": len(producers),
@@ -823,6 +859,14 @@ def run_pipeline_benchmark(
         ),
         "queue_size": int(queue_size),
         "molecule_chunk_size": int(chunk_size),
+    }
+    result["pipeline_diagnostics"] = {
+        "expected_molecule_count": len(expected_ids),
+        "received_result_count": len(received_ids),
+        "missing_molecule_ids": [mid for mid in expected_ids if mid not in received_ids],
+        "producer_exitcodes": {proc.name: proc.exitcode for proc in producers},
+        "consumer_exitcodes": {proc.name: proc.exitcode for proc in consumers},
+        "errors": pipeline_errors,
     }
     return result
 
@@ -861,6 +905,33 @@ def write_report(report: Dict[str, Any], output_json: Path, output_md: Path) -> 
             )
 
     output_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_partial_report(
+    *,
+    output_dir: Path,
+    config_snapshot: Dict[str, Any],
+    results: Dict[str, Dict[str, Any]],
+    comparisons: Optional[List[Dict[str, Any]]] = None,
+    benchmark_errors: Optional[List[str]] = None,
+) -> None:
+    benchmark_rows = [
+        results[key]
+        for key in ["serial", "parallel-consumer", "pipeline"]
+        if key in results
+    ]
+    report = {
+        "config": config_snapshot,
+        "benchmarks": benchmark_rows,
+        "correctness_comparisons": comparisons or [],
+        "benchmark_errors": benchmark_errors or [],
+        "report_status": "partial" if benchmark_errors else "complete",
+    }
+    write_report(
+        report,
+        output_dir / "fastorca_performance_benchmark.partial.json",
+        output_dir / "fastorca_performance_benchmark.partial.md",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -925,70 +996,84 @@ def main() -> None:
     )
 
     results: Dict[str, Dict[str, Any]] = {}
-
-    if "serial" in args.modes:
-        print("[benchmark] starting mode=serial_baseline", flush=True)
-        results["serial"] = run_serial_benchmark(
-            molecules=molecules,
-            output_dir=output_dir / "serial",
-            profile_path=profile_path,
-            dft_config=dft_config,
-        )
-
-    if "parallel-consumer" in args.modes:
-        print("[benchmark] starting mode=parallel_consumer", flush=True)
-        results["parallel-consumer"] = run_parallel_consumer_benchmark(
-            molecules=molecules,
-            output_dir=output_dir / "parallel_consumer",
-            profile_path=profile_path,
-            dft_config=dft_config,
-            n_workers=args.n_consumer_workers,
-        )
-
-    if "pipeline" in args.modes:
-        print(
-            f"[benchmark] starting mode=pipeline_overlap n_gpu_producers={args.n_gpu_producers} n_cpu_consumers={args.n_consumer_workers}",
-            flush=True,
-        )
-        results["pipeline"] = run_pipeline_benchmark(
-            molecules=molecules,
-            output_dir=output_dir / "pipeline",
-            profile_path=profile_path,
-            dft_config=dft_config,
-            n_consumers=args.n_consumer_workers,
-            queue_size=args.queue_size,
-            n_gpu_producers=args.n_gpu_producers,
-        )
-
+    benchmark_errors: List[str] = []
     comparisons: List[Dict[str, Any]] = []
-    if "serial" in results and "parallel-consumer" in results:
-        comparisons.append(
-            {
-                "label": "serial_vs_parallel_consumer",
-                "result": compare_unified_dirs(
-                    output_dir / "serial",
-                    output_dir / "parallel_consumer",
-                    DEFAULT_COMPARE_PATHS,
-                ),
-            }
+
+    try:
+        if "serial" in args.modes:
+            print("[benchmark] starting mode=serial_baseline", flush=True)
+            results["serial"] = run_serial_benchmark(
+                molecules=molecules,
+                output_dir=output_dir / "serial",
+                profile_path=profile_path,
+                dft_config=dft_config,
+            )
+
+        if "parallel-consumer" in args.modes:
+            print("[benchmark] starting mode=parallel_consumer", flush=True)
+            results["parallel-consumer"] = run_parallel_consumer_benchmark(
+                molecules=molecules,
+                output_dir=output_dir / "parallel_consumer",
+                profile_path=profile_path,
+                dft_config=dft_config,
+                n_workers=args.n_consumer_workers,
+            )
+
+        if "pipeline" in args.modes:
+            print(
+                f"[benchmark] starting mode=pipeline_overlap n_gpu_producers={args.n_gpu_producers} n_cpu_consumers={args.n_consumer_workers}",
+                flush=True,
+            )
+            results["pipeline"] = run_pipeline_benchmark(
+                molecules=molecules,
+                output_dir=output_dir / "pipeline",
+                profile_path=profile_path,
+                dft_config=dft_config,
+                n_consumers=args.n_consumer_workers,
+                queue_size=args.queue_size,
+                n_gpu_producers=args.n_gpu_producers,
+            )
+
+        if "serial" in results and "parallel-consumer" in results:
+            comparisons.append(
+                {
+                    "label": "serial_vs_parallel_consumer",
+                    "result": compare_unified_dirs(
+                        output_dir / "serial",
+                        output_dir / "parallel_consumer",
+                        DEFAULT_COMPARE_PATHS,
+                    ),
+                }
+            )
+        if "serial" in results and "pipeline" in results:
+            comparisons.append(
+                {
+                    "label": "serial_vs_pipeline",
+                    "result": compare_unified_dirs(
+                        output_dir / "serial",
+                        output_dir / "pipeline",
+                        DEFAULT_COMPARE_PATHS,
+                    ),
+                }
+            )
+    except Exception as exc:
+        benchmark_errors.append(f"{type(exc).__name__}: {exc}")
+        _write_partial_report(
+            output_dir=output_dir,
+            config_snapshot=config_snapshot,
+            results=results,
+            comparisons=comparisons,
+            benchmark_errors=benchmark_errors,
         )
-    if "serial" in results and "pipeline" in results:
-        comparisons.append(
-            {
-                "label": "serial_vs_pipeline",
-                "result": compare_unified_dirs(
-                    output_dir / "serial",
-                    output_dir / "pipeline",
-                    DEFAULT_COMPARE_PATHS,
-                ),
-            }
-        )
+        raise
 
     benchmark_rows = [results[key] for key in ["serial", "parallel-consumer", "pipeline"] if key in results]
     report = {
         "config": config_snapshot,
         "benchmarks": benchmark_rows,
         "correctness_comparisons": comparisons,
+        "benchmark_errors": benchmark_errors,
+        "report_status": "complete",
     }
 
     output_json = output_dir / "fastorca_performance_benchmark.json"
