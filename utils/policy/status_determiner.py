@@ -252,13 +252,15 @@ class MoleculeResult:
         overall_status: str,
         reason_codes: List[str],
         data: Dict[str, Any],
-        wall_time_seconds: float = 0.0
+        wall_time_seconds: float = 0.0,
+        metrics: Optional[Dict[str, Any]] = None,
     ):
         self.molecule_id = molecule_id
         self.overall_status = overall_status
         self.reason_codes = reason_codes
         self.data = data
         self.wall_time_seconds = wall_time_seconds
+        self.metrics = metrics or {}
     
     def has_hard_fail(self) -> bool:
         """是否包含 hard_fail"""
@@ -287,4 +289,5 @@ class MoleculeResult:
             "wall_time_seconds": self.wall_time_seconds,
             "has_hard_fail": self.has_hard_fail(),
             "has_soft_fail": self.has_soft_fail(),
+            "metrics": self.metrics,
         }

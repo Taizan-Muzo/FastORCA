@@ -18,6 +18,73 @@ from utils.policy.status_determiner import MoleculeResult
 from .molecule_processor import MoleculeProcessor, MoleculeProcessorConfig
 
 
+_WORKER_PROCESSOR: Optional[MoleculeProcessor] = None
+
+
+def _capture_feature_extractor_state(feature_extractor: Any) -> Dict[str, Any]:
+    """Capture lightweight extractor state for worker-local reconstruction."""
+    state = {
+        "constructor_kwargs": {
+            "use_multiwfn": getattr(feature_extractor, "use_multiwfn", False),
+            "multiwfn_path": getattr(feature_extractor, "multiwfn_path", "Multiwfn"),
+            "output_format": getattr(feature_extractor, "output_format", "json"),
+        },
+        "runtime_overrides": {},
+    }
+    for key in [
+        "BADER_POPULATION_SUM_ABS_TOL_E",
+        "BADER_POPULATION_SUM_REL_TOL",
+        "BADER_REFINED_RETRY_ENABLED",
+        "BADER_REFINED_GRID_RES_ANGSTROM",
+        "BADER_REFINED_MARGIN_ANGSTROM",
+        "BADER_REFINED_MAX_POINTS_PER_DIM",
+        "BADER_REFINED_MAX_TOTAL_GRID_POINTS",
+        "BADER_RESCUE_RETRY_ENABLED",
+        "BADER_RESCUE_GRID_RES_ANGSTROM",
+        "BADER_RESCUE_MARGIN_ANGSTROM",
+        "BADER_RESCUE_MAX_POINTS_PER_DIM",
+        "BADER_RESCUE_MAX_TOTAL_GRID_POINTS",
+    ]:
+        if hasattr(feature_extractor, key):
+            state["runtime_overrides"][key] = getattr(feature_extractor, key)
+    return state
+
+
+def _build_feature_extractor_from_state(state: Dict[str, Any]) -> Any:
+    from consumer.feature_extractor import FeatureExtractor
+
+    extractor = FeatureExtractor(**dict(state.get("constructor_kwargs") or {}))
+    for key, value in (state.get("runtime_overrides") or {}).items():
+        setattr(extractor, key, value)
+    return extractor
+
+
+def _batch_worker_init(
+    extractor_state: Dict[str, Any],
+    processor_config: Dict[str, Any],
+    output_dir: str,
+) -> None:
+    global _WORKER_PROCESSOR
+
+    extractor = _build_feature_extractor_from_state(extractor_state)
+    config = MoleculeProcessorConfig.from_dict(processor_config)
+    _WORKER_PROCESSOR = config.create_processor(extractor, Path(output_dir))
+
+
+def _batch_worker_process_one(mol_info: Dict[str, Any]) -> MoleculeResult:
+    global _WORKER_PROCESSOR
+    if _WORKER_PROCESSOR is None:
+        raise RuntimeError("Batch worker processor is not initialized")
+
+    return _WORKER_PROCESSOR.process_one(
+        pkl_path=Path(mol_info["pkl_path"]),
+        molecule_id=mol_info["molecule_id"],
+        smiles=mol_info.get("smiles"),
+        dft_config=mol_info.get("dft_config"),
+        return_data_mode="summary",
+    )
+
+
 class BatchRunner:
     """批处理运行器"""
     
@@ -32,13 +99,16 @@ class BatchRunner:
         self.config = config
         self.output_dir = Path(output_dir)
         self.n_workers = n_workers
+        self._processor_config_dict = config.to_dict()
+        self._extractor_state = _capture_feature_extractor_state(processor.feature_extractor)
         
         self.summary_builder = BatchSummaryBuilder(run_mode=config.run_mode)
     
     def run(
         self,
         molecule_list: List[Dict[str, Any]],
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        include_molecule_results: bool = False,
     ) -> Dict[str, Any]:
         """
         运行批处理
@@ -58,17 +128,24 @@ class BatchRunner:
         if self.n_workers == 1:
             # 单线程模式
             for i, mol_info in enumerate(molecule_list):
-                result = self._process_one_molecule(mol_info)
+                result = self._process_one_molecule(mol_info, return_data_mode="summary")
                 self.summary_builder.add_molecule_result(result)
                 
                 if progress_callback:
                     progress_callback(i + 1, total, mol_info.get("molecule_id", ""))
         else:
-            # 多进程模式
-            # 注意：这里简化处理，实际需要考虑进程间通信
-            with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+            # 多进程模式：使用 worker-local processor，避免每个任务重复序列化大对象。
+            with ProcessPoolExecutor(
+                max_workers=self.n_workers,
+                initializer=_batch_worker_init,
+                initargs=(
+                    self._extractor_state,
+                    self._processor_config_dict,
+                    str(self.output_dir),
+                ),
+            ) as executor:
                 future_to_mol = {
-                    executor.submit(self._process_one_molecule, mol_info): mol_info
+                    executor.submit(_batch_worker_process_one, mol_info): mol_info
                     for mol_info in molecule_list
                 }
                 
@@ -90,6 +167,10 @@ class BatchRunner:
         # 完成并生成报告
         self.summary_builder.finish()
         summary = self.summary_builder.build()
+        if include_molecule_results:
+            summary["molecule_results"] = [
+                result.to_dict() for result in self.summary_builder.molecule_results
+            ]
         
         # 保存报告
         summary_path = self.output_dir / f"batch_summary_{self.summary_builder.batch_id}.json"
@@ -100,7 +181,11 @@ class BatchRunner:
         
         return summary
     
-    def _process_one_molecule(self, mol_info: Dict[str, Any]) -> MoleculeResult:
+    def _process_one_molecule(
+        self,
+        mol_info: Dict[str, Any],
+        return_data_mode: str = "full",
+    ) -> MoleculeResult:
         """处理单个分子（包装器）"""
         pkl_path = Path(mol_info["pkl_path"])
         molecule_id = mol_info["molecule_id"]
@@ -111,7 +196,8 @@ class BatchRunner:
             pkl_path=pkl_path,
             molecule_id=molecule_id,
             smiles=smiles,
-            dft_config=dft_config
+            dft_config=dft_config,
+            return_data_mode=return_data_mode,
         )
     
     def _build_error_result(
@@ -125,7 +211,8 @@ class BatchRunner:
             overall_status="failed_core_features",
             reason_codes=["wavefunction_corrupted"],
             data={"error": error_msg},
-            wall_time_seconds=0.0
+            wall_time_seconds=0.0,
+            metrics={"error": error_msg},
         )
 
 
@@ -169,7 +256,8 @@ def run_batch(
     run_mode: str = "full",
     artifact_policy: str = "keep_core_only",
     plugin_config: Optional[Dict[str, Any]] = None,
-    n_workers: int = 1
+    n_workers: int = 1,
+    include_molecule_results: bool = False,
 ) -> Dict[str, Any]:
     """
     便捷函数：一键运行批处理
@@ -192,7 +280,7 @@ def run_batch(
     }
     
     runner = create_batch_runner(feature_extractor, config, output_dir, n_workers)
-    return runner.run(molecule_list)
+    return runner.run(molecule_list, include_molecule_results=include_molecule_results)
 
 
 # if __name__ == "__main__":

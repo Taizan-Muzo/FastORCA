@@ -91,6 +91,7 @@ class DFTCalculator:
         self.geometry_optimization = geometry_optimization
         self.geo_opt_method = geo_opt_method
         self.geo_opt_maxsteps = geo_opt_maxsteps
+        self._last_run_sp_backend = None
         
         logger.info(f"DFTCalculator initialized: {functional}/{basis}")
         logger.info(f"GPU available: {GPU_AVAILABLE}")
@@ -415,6 +416,7 @@ class DFTCalculator:
             if GPU_AVAILABLE:
                 logger.info(f"[{molecule_id}] Trying GPU acceleration...")
                 try:
+                    self._last_run_sp_backend = "gpu"
                     mf = GPU_RKS(mol_obj).density_fit(auxbasis='def2-svp-jkfit')
                     mf.xc = self.functional
 
@@ -447,6 +449,7 @@ class DFTCalculator:
                     
                 except Exception as gpu_error:
                     import traceback
+                    self._last_run_sp_backend = "gpu_fallback_cpu"
                     logger.error(f"[{molecule_id}] ❌ GPU calculation failed!")
                     logger.error(f"[{molecule_id}] === TRACEBACK START ===")
                     logger.error(traceback.format_exc())
@@ -454,6 +457,8 @@ class DFTCalculator:
                     logger.warning(f"[{molecule_id}] ⚠️ Falling back to CPU mode")
             
             mol_obj.verbose = 0  # M5: 静音
+            if self._last_run_sp_backend is None:
+                self._last_run_sp_backend = "cpu"
             if mol_obj.natm > 6: 
                 logger.info(f"[{molecule_id}] Using density fitting for CPU calculation")
                 mf = dft.RKS(mol_obj).density_fit()
@@ -525,17 +530,29 @@ class DFTCalculator:
             "pkl_file": None,
             "pkl_path": None,
             "error": None,
+            "timing_seconds": {},
+            "execution_backend": None,
         }
         
         try:
+            calc_start = time.time()
             mf = self.run_sp(molecule_id, mol_obj)
+            run_sp_elapsed = time.time() - calc_start
             result["energy"] = mf.e_tot
             result["converged"] = mf.converged
+            result["execution_backend"] = self._last_run_sp_backend or ("gpu" if GPU_AVAILABLE else "cpu")
             
+            export_start = time.time()
             pkl_path = self.export_wavefunction(mf, molecule_id, output_dir)
+            export_elapsed = time.time() - export_start
             result["pkl_file"] = pkl_path
             result["pkl_path"] = pkl_path
             result["success"] = True
+            result["timing_seconds"] = {
+                "run_sp_seconds": run_sp_elapsed,
+                "export_wavefunction_seconds": export_elapsed,
+                "calculate_and_export_seconds": run_sp_elapsed + export_elapsed,
+            }
             
         except Exception as e:
             result["error"] = str(e)

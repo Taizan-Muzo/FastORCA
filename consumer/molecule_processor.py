@@ -38,7 +38,8 @@ class MoleculeProcessor:
         pkl_path: Path,
         molecule_id: str,
         smiles: Optional[str] = None,
-        dft_config: Optional[Dict[str, Any]] = None
+        dft_config: Optional[Dict[str, Any]] = None,
+        return_data_mode: str = "full",
     ) -> MoleculeResult:
         """
         处理单个分子
@@ -53,41 +54,55 @@ class MoleculeProcessor:
             MoleculeResult 包含处理结果和状态
         """
         start_time = time.time()
+        metrics: Dict[str, Any] = {}
         
         try:
-            # 1. 获取插件执行计划
-            # 需要先加载分子获取 natm
-            natm = self._get_natm_from_pkl(pkl_path)
+            # 1. 预加载波函数，避免 _get_natm_from_pkl + extract_unified 双重反序列化
+            wf_load_start = time.time()
+            loaded_wavefunction = self.feature_extractor.load_wavefunction(str(pkl_path))
+            mol, _mf = loaded_wavefunction
+            metrics["wavefunction_load_seconds"] = time.time() - wf_load_start
+
+            # 2. 获取插件执行计划
+            natm = getattr(mol, "natm", self._get_natm_from_pkl(pkl_path))
             plugin_plan = self.plugin_registry.get_all_plugin_status(
                 self.run_mode, natm
             )
             
-            # 2. 调用特征提取
-            # 传入插件计划，让 extractor 知道哪些该执行
+            # 3. 调用特征提取
+            extract_start = time.time()
             unified_data = self.feature_extractor.extract_unified(
                 pkl_path=str(pkl_path),
                 molecule_id=molecule_id,
                 smiles=smiles,
                 dft_config=dft_config,
                 plugin_plan=plugin_plan,
-                run_mode=self.run_mode
+                run_mode=self.run_mode,
+                loaded_wavefunction=loaded_wavefunction,
             )
+            metrics["unified_extract_seconds"] = time.time() - extract_start
             
-            # 3. 状态判定
+            # 4. 状态判定
+            status_start = time.time()
             determiner = StatusDeterminer(unified_data)
             overall_status = determiner.determine()
             reason_codes = determiner.get_reason_codes()
+            metrics["status_determination_seconds"] = time.time() - status_start
             
-            # 4. Artifact 清理
+            # 5. Artifact 清理
+            cleanup_start = time.time()
             cleanup_info = self.artifact_manager.cleanup_molecule(
                 molecule_id, overall_status
             )
+            metrics["artifact_cleanup_seconds"] = time.time() - cleanup_start
             
-            # 5. 保存 unified json 文件
+            # 6. 保存 unified json 文件
             output_path = self.artifact_manager.output_dir / f"{molecule_id}"
+            save_start = time.time()
             self.feature_extractor.save_unified_features(unified_data, str(output_path))
+            metrics["save_unified_seconds"] = time.time() - save_start
             
-            # 6. 记录 cleanup 信息到数据
+            # 7. 记录 cleanup 信息到数据
             unified_data["_cleanup_info"] = cleanup_info
             
         except Exception as e:
@@ -95,15 +110,21 @@ class MoleculeProcessor:
             overall_status = "failed_core_features"
             reason_codes = ["wavefunction_corrupted"]
             unified_data = self._build_error_data(molecule_id, smiles, str(e))
+            metrics["error"] = str(e)
         
         wall_time = time.time() - start_time
+        metrics["processor_wall_time_seconds"] = wall_time
+        payload = unified_data
+        if return_data_mode == "summary":
+            payload = self._build_batch_summary_payload(unified_data)
         
         return MoleculeResult(
             molecule_id=molecule_id,
             overall_status=overall_status,
             reason_codes=reason_codes,
-            data=unified_data,
-            wall_time_seconds=wall_time
+            data=payload,
+            wall_time_seconds=wall_time,
+            metrics=metrics,
         )
     
     def _get_natm_from_pkl(self, pkl_path: Path) -> int:
@@ -138,6 +159,43 @@ class MoleculeProcessor:
         )
         
         return builder.build()
+
+    @staticmethod
+    def _build_batch_summary_payload(unified_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build a compact payload for batch summary aggregation.
+
+        Workers already save the full unified JSON to disk. Returning the full
+        document through multiprocessing IPC creates significant serialization
+        overhead for large atom/bond/realspace payloads, so the batch path keeps
+        only the fields that BatchSummaryBuilder actually consumes plus a few
+        lightweight timing hooks for benchmarking.
+        """
+        orbital_meta = (
+            ((unified_data.get("orbital_features") or {}).get("metadata") or {}).copy()
+        )
+        realspace_meta = (
+            ((unified_data.get("realspace_features") or {}).get("metadata") or {}).copy()
+        )
+        critic2_meta = (
+            ((unified_data.get("external_bridge") or {}).get("critic2") or {}).copy()
+        )
+        runtime_meta = (unified_data.get("runtime_metadata") or {}).copy()
+        provenance = (unified_data.get("provenance") or {}).copy()
+
+        return {
+            "orbital_features": {"metadata": orbital_meta},
+            "realspace_features": {"metadata": realspace_meta},
+            "external_bridge": {"critic2": critic2_meta},
+            "runtime_metadata": {
+                "unified_extraction_time_seconds": runtime_meta.get("unified_extraction_time_seconds"),
+                "stage_timing_seconds": runtime_meta.get("stage_timing_seconds"),
+                "extraction_timestamp": runtime_meta.get("extraction_timestamp"),
+            },
+            "provenance": {
+                "wall_time_seconds": provenance.get("wall_time_seconds"),
+            },
+        }
 
 
 class MoleculeProcessorConfig:
@@ -177,3 +235,11 @@ class MoleculeProcessorConfig:
             artifact_manager=artifact_manager,
             run_mode=self.run_mode
         )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize processor config for worker-local reconstruction."""
+        return {
+            "run_mode": self.run_mode,
+            "artifact_policy": self.artifact_policy.value,
+            "plugins": self.plugin_config,
+        }

@@ -1053,6 +1053,7 @@ class FeatureExtractor:
         plugin_plan: Dict[str, Any] = None,
         run_mode: str = "full",
         output_dir: str = None,
+        loaded_wavefunction: Optional[Tuple[gto.Mole, dft.rks.RKS]] = None,
     ) -> Dict[str, Any]:
         """
         使用统一 Schema 提取特征（Milestone 1 新接口）
@@ -1076,6 +1077,10 @@ class FeatureExtractor:
         from loguru import logger
         
         start_time = time.time()
+        stage_timings: Dict[str, float] = {}
+
+        def _record_stage(name: str, stage_start: float) -> None:
+            stage_timings[name] = max(0.0, time.time() - stage_start)
         
         # 创建 unified builder
         builder = UnifiedOutputBuilder(molecule_id, smiles or "")
@@ -1105,6 +1110,7 @@ class FeatureExtractor:
         builder.set_plugin_status("pyscf", available=True)  # PySCF 是必须依赖
         
         # ============ 步骤 1: RDKit 解析 ============
+        rdkit_stage_start = time.time()
         mol_rdkit = None
         if smiles:
             builder.set_plugin_status("rdkit", used=True)
@@ -1167,19 +1173,26 @@ class FeatureExtractor:
                     builder.set_status(rdkit_parse_success=False, invalid_input=True)
                     builder.add_error(f"RDKit failed to parse SMILES: '{smiles}'")
                     builder.set_plugin_status("rdkit", success=False, errors=["Failed to parse SMILES"])
+                    _record_stage("rdkit_parse_seconds", rdkit_stage_start)
+                    builder.data["runtime_metadata"]["stage_timing_seconds"] = stage_timings
                     return builder.build()
             except Exception as e:
                 builder.set_status(rdkit_parse_success=False)
                 builder.add_error(f"RDKit error: {e}")
                 builder.set_plugin_status("rdkit", success=False, errors=[str(e)])
+        _record_stage("rdkit_parse_seconds", rdkit_stage_start)
         
         # ============ 步骤 2: 加载波函数 ============
+        wavefunction_stage_start = time.time()
         mol = None
         mf = None
         builder.set_artifacts_wavefunction(pkl_path=pkl_path)
         
         try:
-            mol, mf = self.load_wavefunction(pkl_path)
+            if loaded_wavefunction is not None:
+                mol, mf = loaded_wavefunction
+            else:
+                mol, mf = self.load_wavefunction(pkl_path)
             builder.set_status(wavefunction_load_success=True)
             builder.set_artifacts_wavefunction(loaded_successfully=True)
             builder.set_plugin_status("pyscf", used=True, success=True)
@@ -1286,8 +1299,13 @@ class FeatureExtractor:
             builder.set_artifacts_wavefunction(loaded_successfully=False)
             builder.add_error(f"Failed to load wavefunction: {e}")
             builder.set_plugin_status("pyscf", used=True, success=False, errors=[str(e)])
+            _record_stage("wavefunction_load_seconds", wavefunction_stage_start)
+            builder.data["runtime_metadata"]["stage_timing_seconds"] = stage_timings
             return builder.build()
+        _record_stage("wavefunction_load_seconds", wavefunction_stage_start)
         
+        core_pre_orbital_stage_start = time.time()
+
         # ============ 步骤 3: 提取全局 DFT 特征 ============
         if mol is not None and mf is not None:
             try:
@@ -1576,7 +1594,11 @@ class FeatureExtractor:
                 )
             except Exception as e:
                 logger.warning(f"[{molecule_id}] Fock matrix extraction failed: {e}")
+
+        _record_stage("core_pre_orbital_feature_seconds", core_pre_orbital_stage_start)
         
+        orbital_stage_start = time.time()
+
         # ============ 步骤 10: 提取局域轨道特征（Milestone 2） ============
         # 检查 plugin_plan
         should_run_orbital = True
@@ -1821,7 +1843,11 @@ class FeatureExtractor:
                 skip_reason=None,
                 failure_reason=None,
             )
+
+        _record_stage("orbital_features_seconds", orbital_stage_start)
         
+        realspace_stage_start = time.time()
+
         # ============ 步骤 11: 提取实空间特征（Milestone 3） ============
         # 检查 plugin_plan
         should_run_realspace = True
@@ -1921,6 +1947,10 @@ class FeatureExtractor:
                 extraction_status="skipped",
                 failure_reason=realspace_skip_reason
             )
+
+        _record_stage("realspace_features_seconds", realspace_stage_start)
+
+        critic2_stage_start = time.time()
         
         # ============ 步骤 12: External Bridge - Critic2 (Milestone 4) ============
         # 检查 plugin_plan
@@ -2026,6 +2056,10 @@ class FeatureExtractor:
                 failure_reason="disabled_by_plan",
             )
 
+        _record_stage("critic2_bridge_seconds", critic2_stage_start)
+
+        postprocess_validation_stage_start = time.time()
+
         # 同步 Bader 写回到 atom-level proxy，并明确区分
         # success / unavailable / not_attempted 语义
         self._sync_bader_partition_proxy_from_external(builder, molecule_id, mol=mol, mf=mf)
@@ -2051,6 +2085,8 @@ class FeatureExtractor:
                 builder.add_error(f"Feature validation: {reason}")
             # 存储到 builder 的特殊字段供 StatusDeterminer 使用
             builder.data["_validation_errors"] = validation_reasons
+
+        _record_stage("postprocess_validation_seconds", postprocess_validation_stage_start)
         
         # 记录耗时到 runtime_metadata（正式 schema）
         elapsed = time.time() - start_time
@@ -2058,6 +2094,7 @@ class FeatureExtractor:
         builder.data["runtime_metadata"]["extraction_timestamp"] = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
         )
+        builder.data["runtime_metadata"]["stage_timing_seconds"] = stage_timings
         
         # 最终化（所有状态判定在此执行）
         result = builder.build()
